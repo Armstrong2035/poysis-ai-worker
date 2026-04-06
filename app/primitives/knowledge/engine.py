@@ -1,0 +1,264 @@
+import os
+from typing import List, Dict, Any, Optional
+from app.primitives.knowledge.embedder import Embedder
+from app.primitives.knowledge.vector_store import VectorService
+
+# LlamaIndex Imports
+from llama_index.core import Document
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.ingestion import IngestionPipeline
+from llama_index.vector_stores.pinecone import PineconeVectorStore
+from llama_index.embeddings.gemini import GeminiEmbedding
+from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.core.readers import SimpleDirectoryReader
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_parse import LlamaParse
+
+class KnowledgeEngine:
+    """
+    The Unified Knowledge Engine (Core Memory).
+    Consolidates embedding generation and vector storage into a single capability.
+    """
+    def __init__(self):
+        self.embedder = Embedder()
+        self.vector_service = VectorService()
+
+    async def upsert_documents(self, notebook_id: str, documents: List[Dict[str, Any]]) -> int:
+        """
+        [Legacy/JSON Path] Takes a list of standard JSON documents and indexes them.
+        Each doc should have 'text' and 'source_id'.
+        """
+        if not notebook_id:
+            raise ValueError("notebook_id is required for indexing.")
+
+        # Convert simple JSON docs to LlamaIndex Documents for unified processing
+        llama_docs = [
+            Document(
+                text=doc.get("text") or doc.get("content"),
+                id_=str(doc.get("source_id") or doc.get("id")),
+                metadata=doc.get("metadata") or {}
+            )
+            for doc in documents if doc.get("text") or doc.get("content")
+        ]
+        
+        if not llama_docs:
+            return 0
+
+        return await self._run_ingestion_pipeline(notebook_id, llama_docs)
+
+    async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document]) -> int:
+        """
+        Core ingestion pipeline using LlamaIndex for parallelized batch processing.
+        """
+        # 1. Setup Vector Store (Pinecone)
+        vector_store = PineconeVectorStore(
+            pinecone_index=self.vector_service.index,
+            namespace=notebook_id
+        )
+
+        # 2. Setup Embedding Model (Gemini)
+        # Note: LlamaIndex handles batching internally
+        embed_model = GeminiEmbedding(
+            model_name="models/gemini-embedding-001", # Correct model name
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        # 3. Create Pipeline with transformations
+        pipeline = IngestionPipeline(
+            transformations=[
+                SentenceSplitter(chunk_size=512, chunk_overlap=50),
+                embed_model,
+            ],
+            vector_store=vector_store,
+        )
+
+        # 4. Run Pipeline (Async)
+        # This performs chunking -> embedding -> upserting in parallel batches
+        nodes = await pipeline.arun(documents=documents, show_progress=True)
+        return len(nodes)
+
+    async def fetch_raw(self, notebook_id: str, text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """
+        FIXED: Now uses LlamaIndex's internal retriever logic to ensure 
+        correct metadata mapping and scoring.
+        """
+        # 1. Setup Vector Store
+        vector_store = PineconeVectorStore(
+            pinecone_index=self.vector_service.index,
+            namespace=notebook_id
+        )
+        
+        # 2. Setup Embedder (Gemini)
+        embed_model = GeminiEmbedding(
+            model_name="models/gemini-embedding-001",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        # 3. Create Index and Retriever
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model
+        )
+        
+        # We fetch extra candidates to perform the same 'Score Gap' trimming Poysis likes
+        retriever = index.as_retriever(similarity_top_k=top_k * 2)
+        nodes = await retriever.aretrieve(text)
+        
+        # 4. Format for Poysis Blocks
+        results = []
+        for node in nodes:
+            results.append({
+                "id": node.node.node_id,
+                "score": node.score,
+                "metadata": node.node.metadata,
+                "text": node.node.get_content() # Always pulls full text
+            })
+        
+        return results
+
+    async def answer_question(self, notebook_id: str, query: str) -> Dict[str, Any]:
+        """
+        THE INTELLIGENCE LAYER: Answers a direct question by synthesizing 
+        information from the relevant document chunks.
+        """
+        # 1. Setup Retrieval Components
+        vector_store = PineconeVectorStore(
+            pinecone_index=self.vector_service.index,
+            namespace=notebook_id
+        )
+        
+        embed_model = GeminiEmbedding(
+            model_name="models/gemini-embedding-001",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        # 2. Setup Reasoning Engine (Gemini 3 Flash via google-genai)
+        llm = GoogleGenAI(
+            model="gemini-3-flash-preview",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        # 3. Create Query Engine (top_k=3 for speed without significant quality loss)
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model
+        )
+        
+        query_engine = index.as_query_engine(
+            llm=llm,
+            similarity_top_k=3,
+            streaming=False
+        )
+
+        # 4. Execute RAG
+        print(f"[KnowledgeEngine] Reasoning across notebook '{notebook_id}' to answer: '{query}'")
+        response = await query_engine.aquery(query)
+        
+        # 5. Extract Citations
+        sources = []
+        for node in response.source_nodes:
+            sources.append({
+                "file": node.node.metadata.get("source_file"),
+                "score": node.score,
+                "snippet": node.node.get_content()[:200] + "..."
+            })
+
+        return {
+            "answer": str(response),
+            "sources": sources
+        }
+
+    async def stream_answer(self, notebook_id: str, query: str):
+        """
+        STREAMING INTELLIGENCE LAYER: Yields answer tokens as they arrive from Gemini.
+        First token appears in ~1s. Sources are yielded last as a JSON object.
+        Use with FastAPI StreamingResponse.
+        """
+        import json
+
+        # 1. Setup Components (same as answer_question)
+        vector_store = PineconeVectorStore(
+            pinecone_index=self.vector_service.index,
+            namespace=notebook_id
+        )
+        embed_model = GeminiEmbedding(
+            model_name="models/gemini-embedding-001",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+        llm = GoogleGenAI(
+            model="gemini-3-flash-preview",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+        # 2. Create Streaming Query Engine
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model
+        )
+        query_engine = index.as_query_engine(
+            llm=llm,
+            similarity_top_k=3,
+            streaming=True  # KEY: enables token streaming
+        )
+
+        print(f"[KnowledgeEngine] Streaming answer for notebook '{notebook_id}'...")
+        
+        # 3. Stream tokens as they arrive
+        streaming_response = await query_engine.aquery(query)
+        
+        async for token in streaming_response.async_response_gen():
+            yield token
+
+        # 4. Yield sources as a final structured chunk
+        sources = []
+        for node in streaming_response.source_nodes:
+            sources.append({
+                "file": node.node.metadata.get("source_file"),
+                "score": node.score,
+                "snippet": node.node.get_content()[:200] + "..."
+            })
+        
+        # Signal end of stream with sources metadata
+        yield f"\n\n__SOURCES__{json.dumps(sources)}"
+
+    async def ingest_file(self, notebook_id: str, file_path: str) -> int:
+        """
+        High-efficiency ingestion using LlamaIndex Readers.
+        Automatically detects file type and uses the best parser (PDF, Excel, CSV, etc).
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        print(f"[KnowledgeEngine] High-efficiency ingestion of {file_path} for notebook '{notebook_id}'")
+        
+        # 1. Setup specialized parsers (e.g. LlamaParse for PDFs)
+        file_extractor = {}
+        # LlamaIndex usually looks for LLAMA_CLOUD_API_KEY
+        llama_parse_key = os.getenv("LLAMA_CLOUD_API_KEY")
+        if llama_parse_key and file_path.lower().endswith(".pdf"):
+            print(f"[KnowledgeEngine] Using LlamaParse for high-fidelity PDF extraction...")
+            parser = LlamaParse(
+                api_key=llama_parse_key, 
+                result_type="markdown", # Superior for LLM reasoning
+                num_workers=4 # Faster processing
+            )
+            file_extractor = {".pdf": parser}
+
+        # 2. Load documents using LlamaIndex automatic readers
+        try:
+            reader = SimpleDirectoryReader(input_files=[file_path], file_extractor=file_extractor)
+            documents = reader.load_data()
+            
+            # Inject metadata
+            for doc in documents:
+                doc.metadata["notebook_id"] = notebook_id
+                doc.metadata["source_file"] = os.path.basename(file_path)
+
+            # 2. Hand over to ingestion pipeline
+            return await self._run_ingestion_pipeline(notebook_id, documents)
+            
+        except Exception as e:
+            print(f"[KnowledgeEngine Error] LlamaIndex Ingestion failed for {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
