@@ -223,42 +223,58 @@ class KnowledgeEngine:
 
     async def ingest_file(self, notebook_id: str, file_path: str) -> int:
         """
-        High-efficiency ingestion using LlamaIndex Readers.
-        Automatically detects file type and uses the best parser (PDF, Excel, CSV, etc).
+        Ingests a file into the knowledge index.
+        - CSV/Excel: custom row-by-row parser (each row = one vector, columns preserved as metadata)
+        - PDF: LlamaParse if API key available, else SimpleDirectoryReader
+        - TXT/DOCX: SimpleDirectoryReader
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        print(f"[KnowledgeEngine] High-efficiency ingestion of {file_path} for notebook '{notebook_id}'")
-        
-        # 1. Setup specialized parsers (e.g. LlamaParse for PDFs)
-        file_extractor = {}
-        # LlamaIndex usually looks for LLAMA_CLOUD_API_KEY
-        llama_parse_key = os.getenv("LLAMA_CLOUD_API_KEY")
-        if llama_parse_key and file_path.lower().endswith(".pdf"):
-            print(f"[KnowledgeEngine] Using LlamaParse for high-fidelity PDF extraction...")
-            parser = LlamaParse(
-                api_key=llama_parse_key, 
-                result_type="markdown", # Superior for LLM reasoning
-                num_workers=4 # Faster processing
-            )
-            file_extractor = {".pdf": parser}
+        ext = os.path.splitext(file_path)[1].lower()
+        print(f"[KnowledgeEngine] Ingesting '{os.path.basename(file_path)}' ({ext}) for notebook '{notebook_id}'")
 
-        # 2. Load documents using LlamaIndex automatic readers
         try:
-            reader = SimpleDirectoryReader(input_files=[file_path], file_extractor=file_extractor)
-            documents = reader.load_data()
-            
-            # Inject metadata
-            for doc in documents:
-                doc.metadata["notebook_id"] = notebook_id
-                doc.metadata["source_file"] = os.path.basename(file_path)
+            # Spreadsheets: use custom row-by-row parser
+            if ext in {".csv", ".xlsx", ".xls"}:
+                from app.primitives.knowledge.parsers.csv import parse_spreadsheet
+                print(f"[KnowledgeEngine] Using row-by-row spreadsheet parser...")
+                rows = parse_spreadsheet(file_path)
+                documents = [
+                    Document(
+                        text=row["text"],
+                        metadata={
+                            **row["metadata"],
+                            "notebook_id": notebook_id,
+                            "source_file": os.path.basename(file_path),
+                        }
+                    )
+                    for row in rows if row.get("text")
+                ]
 
-            # 2. Hand over to ingestion pipeline
+            # All other formats: LlamaIndex readers
+            else:
+                file_extractor = {}
+                llama_parse_key = os.getenv("LLAMA_CLOUD_API_KEY")
+                if llama_parse_key and ext == ".pdf":
+                    print(f"[KnowledgeEngine] Using LlamaParse for high-fidelity PDF extraction...")
+                    parser = LlamaParse(
+                        api_key=llama_parse_key,
+                        result_type="markdown",
+                        num_workers=4
+                    )
+                    file_extractor = {".pdf": parser}
+
+                reader = SimpleDirectoryReader(input_files=[file_path], file_extractor=file_extractor)
+                documents = reader.load_data()
+                for doc in documents:
+                    doc.metadata["notebook_id"] = notebook_id
+                    doc.metadata["source_file"] = os.path.basename(file_path)
+
             return await self._run_ingestion_pipeline(notebook_id, documents)
-            
+
         except Exception as e:
-            print(f"[KnowledgeEngine Error] LlamaIndex Ingestion failed for {file_path}: {e}")
+            print(f"[KnowledgeEngine Error] Ingestion failed for {file_path}: {e}")
             import traceback
             traceback.print_exc()
             return 0
