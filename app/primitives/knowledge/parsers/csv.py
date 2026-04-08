@@ -20,12 +20,14 @@ def parse_spreadsheet(file_path: str) -> List[Dict[str, Any]]:
         row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
         
         if row_text.strip():
+            # Pinecone rejects null metadata values — drop any empty/NaN fields
+            row_metadata = {k: v for k, v in row.to_dict().items() if pd.notna(v)}
             documents.append({
                 "text": row_text,
                 "metadata": {
                     "source": file_path,
                     "row_index": index,
-                    **row.to_dict() # Keep original data as metadata
+                    **row_metadata
                 }
             })
             
