@@ -46,9 +46,11 @@ class KnowledgeEngine:
 
         return await self._run_ingestion_pipeline(notebook_id, llama_docs)
 
-    async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document]) -> int:
+    async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
         Core ingestion pipeline using LlamaIndex for parallelized batch processing.
+        Set chunk=False for pre-segmented documents (e.g. spreadsheet rows) to skip
+        the SentenceSplitter and avoid metadata-length errors on wide rows.
         """
         # 1. Setup Vector Store (Pinecone)
         vector_store = PineconeVectorStore(
@@ -57,23 +59,23 @@ class KnowledgeEngine:
         )
 
         # 2. Setup Embedding Model (Gemini)
-        # Note: LlamaIndex handles batching internally
         embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001", # Correct model name
+            model_name="models/gemini-embedding-001",
             api_key=os.getenv("GEMINI_API_KEY")
         )
 
-        # 3. Create Pipeline with transformations
+        # 3. Create Pipeline — skip chunking for pre-segmented docs
+        transformations = []
+        if chunk:
+            transformations.append(SentenceSplitter(chunk_size=512, chunk_overlap=50))
+        transformations.append(embed_model)
+
         pipeline = IngestionPipeline(
-            transformations=[
-                SentenceSplitter(chunk_size=512, chunk_overlap=50),
-                embed_model,
-            ],
+            transformations=transformations,
             vector_store=vector_store,
         )
 
         # 4. Run Pipeline (Async)
-        # This performs chunking -> embedding -> upserting in parallel batches
         nodes = await pipeline.arun(documents=documents, show_progress=True)
         return len(nodes)
 
@@ -251,6 +253,8 @@ class KnowledgeEngine:
                     )
                     for row in rows if row.get("text")
                 ]
+                # Each row is already a discrete unit — skip chunking
+                return await self._run_ingestion_pipeline(notebook_id, documents, chunk=False)
 
             # All other formats: LlamaIndex readers
             else:
@@ -271,7 +275,7 @@ class KnowledgeEngine:
                     doc.metadata["notebook_id"] = notebook_id
                     doc.metadata["source_file"] = os.path.basename(file_path)
 
-            return await self._run_ingestion_pipeline(notebook_id, documents)
+                return await self._run_ingestion_pipeline(notebook_id, documents)
 
         except Exception as e:
             print(f"[KnowledgeEngine Error] Ingestion failed for {file_path}: {e}")
