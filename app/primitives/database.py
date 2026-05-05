@@ -108,6 +108,44 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to fetch analytics: {e}")
             return None
 
+    async def save_google_tokens(
+        self,
+        workspace_id: str,
+        access_token: str,
+        refresh_token: str,
+        expiry: str,
+    ) -> bool:
+        """Store or update Google OAuth tokens in consolidation_workspaces."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("consolidation_workspaces").upsert({
+                "workspace_id": workspace_id,
+                "google_access_token": access_token,
+                "google_refresh_token": refresh_token,
+                "google_token_expiry": expiry,
+            }).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save Google tokens: {e}")
+            return False
+
+    async def get_google_tokens(self, workspace_id: str) -> dict | None:
+        """Retrieve stored Google OAuth tokens from consolidation_workspaces."""
+        if not self.client:
+            return None
+        try:
+            res = (
+                self.client.table("consolidation_workspaces")
+                .select("google_access_token, google_refresh_token, google_token_expiry")
+                .eq("workspace_id", workspace_id)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to get Google tokens: {e}")
+            return None
+
     async def get_recent_searches(self, workspace_id: str, limit: int = 50) -> list:
         """Fetch the most recent searches for the live feed."""
         if not self.client: return []

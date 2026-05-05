@@ -7,6 +7,7 @@ from app.blocks.recommendation.router import router as recommendation_router
 from app.blocks.clustering.router import router as clustering_router
 from app.api.tracking import router as tracking_router
 from app.api.analytics import router as analytics_router
+from app.api.auth import router as auth_router
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -38,6 +39,8 @@ app.include_router(clustering_router, prefix="/cluster")
 # Analytics & Tracking
 app.include_router(tracking_router)
 app.include_router(analytics_router)
+# Auth
+app.include_router(auth_router)
 
 if __name__ == "__main__":
     import uvicorn
