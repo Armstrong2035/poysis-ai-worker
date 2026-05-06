@@ -41,6 +41,7 @@ class SnapshotRunner:
         total_files = 0
         total_bytes = 0
         breakdown = {"documents": 0, "spreadsheets": 0, "pdfs": 0}
+        mime_types_found = {}
 
         if "google_drive" in self.scope.sources:
             connector = GoogleDriveConnector(
@@ -51,12 +52,14 @@ class SnapshotRunner:
                 total_bytes += item.size_bytes
                 if item.content_type in breakdown:
                     breakdown[item.content_type] += 1
+                mime_types_found[item.mime_type] = mime_types_found.get(item.mime_type, 0) + 1
 
         return {
             "workspace_id": self.scope.workspace_id,
             "total_files": total_files,
             "total_size_mb": round(total_bytes / (1024 * 1024), 2),
             "breakdown": breakdown,
+            "mime_types_found": mime_types_found,
         }
 
     async def run(self) -> SnapshotResult:
