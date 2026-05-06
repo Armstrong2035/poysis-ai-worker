@@ -124,7 +124,7 @@ class DatabaseService:
                 "google_access_token": access_token,
                 "google_refresh_token": refresh_token,
                 "google_token_expiry": expiry,
-            }).execute()
+            }, on_conflict="workspace_id").execute()
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to save Google tokens: {e}")
