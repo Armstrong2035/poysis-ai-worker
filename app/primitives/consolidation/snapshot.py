@@ -40,7 +40,7 @@ class SnapshotRunner:
         """
         total_files = 0
         total_bytes = 0
-        breakdown = {"documents": 0, "spreadsheets": 0, "pdfs": 0}
+        breakdown = {"document": 0, "spreadsheet": 0, "pdf": 0}
         mime_types_found = {}
 
         if "google_drive" in self.scope.sources:
