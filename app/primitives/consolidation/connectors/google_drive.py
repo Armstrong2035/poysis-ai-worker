@@ -50,7 +50,7 @@ class GoogleDriveConnector(BaseConnector):
 
         if scope.time_window_days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=scope.time_window_days)
-            query_parts.append(f"modifiedTime > '{cutoff.isoformat()}'")
+            query_parts.append(f"modifiedTime > '{cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}'")
 
         if scope.drive_folder_ids:
             parent_clauses = " or ".join(
