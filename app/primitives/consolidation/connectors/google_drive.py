@@ -70,7 +70,7 @@ class GoogleDriveConnector(BaseConnector):
             while fetched < limit:
                 params = {
                     "q": q,
-                    "fields": "nextPageToken,files(id,name,mimeType,webViewLink,etag,modifiedTime,size)",
+                    "fields": "nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime,size)",
                     "pageSize": min(100, int(limit - fetched)) if limit != float("inf") else 100,
                 }
                 if page_token:
@@ -91,7 +91,7 @@ class GoogleDriveConnector(BaseConnector):
                         source_type="google_drive",
                         title=f.get("name", "Untitled"),
                         url=f.get("webViewLink", ""),
-                        etag=f.get("etag", ""),
+                        etag=f.get("modifiedTime", ""),
                         last_modified=datetime.fromisoformat(
                             f["modifiedTime"].replace("Z", "+00:00")
                         ),
