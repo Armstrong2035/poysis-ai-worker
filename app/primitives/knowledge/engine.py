@@ -48,36 +48,44 @@ class KnowledgeEngine:
 
     async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
-        Core ingestion pipeline using LlamaIndex for parallelized batch processing.
-        Set chunk=False for pre-segmented documents (e.g. spreadsheet rows) to skip
-        the SentenceSplitter and avoid metadata-length errors on wide rows.
+        Core ingestion pipeline using LlamaIndex for embedding, then upserts via
+        VectorService directly to avoid llama_index's PineconeVectorStore hanging
+        indefinitely on async_add with no timeout.
+        Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
-        # 1. Setup Vector Store (Pinecone)
-        vector_store = PineconeVectorStore(
-            pinecone_index=self.vector_service.index,
-            namespace=notebook_id
-        )
+        import asyncio
 
-        # 2. Setup Embedding Model (Gemini)
+        # 1. Setup Embedding Model (Gemini)
         embed_model = GeminiEmbedding(
             model_name="models/gemini-embedding-001",
             api_key=os.getenv("GEMINI_API_KEY")
         )
 
-        # 3. Create Pipeline — skip chunking for pre-segmented docs
+        # 2. Create Pipeline — embed only, no vector store (we upsert manually below)
         transformations = []
         if chunk:
             transformations.append(SentenceSplitter(chunk_size=512, chunk_overlap=50))
         transformations.append(embed_model)
 
-        pipeline = IngestionPipeline(
-            transformations=transformations,
-            vector_store=vector_store,
-        )
+        pipeline = IngestionPipeline(transformations=transformations)
 
-        # 4. Run Pipeline (Async)
+        # 3. Embed (Async)
         nodes = await pipeline.arun(documents=documents, show_progress=True)
-        return len(nodes)
+
+        # 4. Upsert via VectorService — strip None values Pinecone rejects
+        vectors = [
+            {
+                "id": node.node_id,
+                "values": node.embedding,
+                "metadata": {k: v for k, v in node.metadata.items() if v is not None},
+            }
+            for node in nodes
+            if node.embedding
+        ]
+        if vectors:
+            await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
+
+        return len(vectors)
 
     async def fetch_raw(self, notebook_id: str, text: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """
