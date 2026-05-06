@@ -4,11 +4,13 @@ from typing import List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
+from app.primitives.consolidation.engine import ConsolidationEngine
 from app.primitives.database import DatabaseService
 from app.primitives.consolidation.google_auth import get_valid_token
 
 router = APIRouter(prefix="/consolidation", tags=["consolidation"])
 db = DatabaseService()
+engine = ConsolidationEngine()
 
 
 class SnapshotRequest(BaseModel):
@@ -61,13 +63,4 @@ async def run_snapshot(req: SnapshotRequest):
         google_access_token=access_token,
     )
 
-    runner = SnapshotRunner(scope=scope)
-    result = await runner.run()
-
-    return {
-        "workspace_id": result.workspace_id,
-        "docs_processed": result.docs_processed,
-        "docs_skipped": result.docs_skipped,
-        "chunks_produced": len(result.all_chunks),
-        "errors": result.errors,
-    }
+    return await engine.run_snapshot(scope)
