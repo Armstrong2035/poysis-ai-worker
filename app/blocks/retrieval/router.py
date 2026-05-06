@@ -14,12 +14,14 @@ class SearchRequest(BaseModel):
     notebook_id: str
     limit: Optional[int] = 5
     min_score: Optional[float] = 0.5  # Block-level policy decision
+    topic_id: Optional[int] = None
 
 @router.post("/search")
 async def search_documents(request: SearchRequest):
     """
     Retrieval Block: Fetches semantically relevant chunks for RAG.
     Policy: Filter by min_score, return top N results, format for consumption.
+    Optional topic_id narrows Pinecone search to BERTopic-enriched chunks.
     """
     try:
         engine = KnowledgeEngine()
@@ -28,7 +30,8 @@ async def search_documents(request: SearchRequest):
         raw_results = await engine.fetch_raw(
             notebook_id=request.notebook_id,
             text=request.query,
-            top_k=request.limit * 2  # Fetch extra, then filter
+            top_k=request.limit * 2,  # Fetch extra, then filter
+            topic_id=request.topic_id,
         )
         
         # Apply block-level policy: filter by minimum score
