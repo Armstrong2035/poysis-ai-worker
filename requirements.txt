@@ -18,3 +18,8 @@ llama-parse
 pymupdf
 pandas
 openpyxl
+bertopic
+umap-learn
+hdbscan
+scikit-learn
+numpy
