@@ -60,7 +60,8 @@ class VectorService:
             
             print(f"[VECTOR]   -> Sending batch {batch_num}/{total_batches} ({len(batch)} vectors)...")
             try:
-                self.index.upsert(vectors=batch, namespace=namespace)
+                self.index.upsert(vectors=batch, namespace=namespace, show_progress=False)
+                print(f"[VECTOR]   -> Batch {batch_num} OK")
             except Exception as e:
                 print(f"[VECTOR ERROR] Failed to upsert batch {batch_num}: {e}")
                 raise e
