@@ -15,6 +15,7 @@ htmlcov/
 
 # Data & Database
 data/
+models/
 *.csv
 *.json
 !app/
