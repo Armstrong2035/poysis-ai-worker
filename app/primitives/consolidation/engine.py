@@ -52,7 +52,7 @@ class ConsolidationEngine:
         ]
 
         vectors_indexed = await self.knowledge._run_ingestion_pipeline(
-            namespace, documents, chunk=False
+            namespace, documents, chunk=True
         )
 
         return {
