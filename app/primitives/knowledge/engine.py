@@ -2,6 +2,7 @@ import os
 from typing import List, Dict, Any, Optional
 from app.primitives.knowledge.embedder import Embedder
 from app.primitives.knowledge.vector_store import VectorService
+from app.primitives.knowledge.bertopic_handler import BertopicHandler
 
 # LlamaIndex Imports
 from llama_index.core import Document
@@ -17,11 +18,16 @@ from llama_parse import LlamaParse
 class KnowledgeEngine:
     """
     The Unified Knowledge Engine (Core Memory).
-    Consolidates embedding generation and vector storage into a single capability.
+    Consolidates embedding generation, BERTopic clustering, and vector storage
+    into a single ingestion capability.
     """
     def __init__(self):
         self.embedder = Embedder()
         self.vector_service = VectorService()
+        self.topic_handler = BertopicHandler(
+            model_path=os.getenv("BERTOPIC_MODEL_PATH", "models/bertopic_model"),
+            min_topic_size=int(os.getenv("BERTOPIC_MIN_TOPIC_SIZE", "15")),
+        )
 
     async def upsert_documents(self, notebook_id: str, documents: List[Dict[str, Any]]) -> int:
         """
@@ -48,9 +54,9 @@ class KnowledgeEngine:
 
     async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
-        Core ingestion pipeline using LlamaIndex for embedding, then upserts via
-        VectorService directly to avoid llama_index's PineconeVectorStore hanging
-        indefinitely on async_add with no timeout.
+        Core ingestion pipeline using LlamaIndex for embedding, enriches chunks
+        with BERTopic topic metadata, then upserts via VectorService directly to
+        avoid llama_index's PineconeVectorStore hanging indefinitely on async_add.
         Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
@@ -71,27 +77,75 @@ class KnowledgeEngine:
 
         # 3. Embed (Async)
         nodes = await pipeline.arun(documents=documents, show_progress=True)
+        embedded_nodes = [node for node in nodes if node.embedding]
 
-        # 4. Upsert via VectorService — strip None values Pinecone rejects
+        # 4. Enrich metadata with BERTopic topics. Clustering is best-effort so
+        # ingestion remains available even if the local model artifacts are cold.
+        metadata_by_node_id = {
+            node.node_id: {k: v for k, v in node.metadata.items() if v is not None}
+            for node in embedded_nodes
+        }
+        if embedded_nodes:
+            try:
+                texts = [node.get_content() for node in embedded_nodes]
+                embeddings = [node.embedding for node in embedded_nodes]
+
+                self.topic_handler.load_or_initialize()
+                if self.topic_handler.has_model:
+                    topics, probabilities = self.topic_handler.transform_new_documents(texts, embeddings)
+                else:
+                    topics, probabilities = self.topic_handler.fit_transform(texts, embeddings)
+
+                chunks = [
+                    {"id": node.node_id, "metadata": metadata_by_node_id[node.node_id]}
+                    for node in embedded_nodes
+                ]
+                enriched_chunks = self.topic_handler.enrich_chunks(chunks, topics, probabilities)
+                metadata_by_node_id = {
+                    chunk["id"]: chunk["metadata"]
+                    for chunk in enriched_chunks
+                }
+                self.topic_handler.save_model()
+            except Exception as e:
+                print(f"[KnowledgeEngine Warning] BERTopic enrichment skipped: {e}")
+
+        # 5. Upsert via VectorService — strip None values Pinecone rejects
         vectors = [
             {
                 "id": node.node_id,
                 "values": node.embedding,
-                "metadata": {k: v for k, v in node.metadata.items() if v is not None},
+                "metadata": metadata_by_node_id.get(node.node_id, {}),
             }
-            for node in nodes
-            if node.embedding
+            for node in embedded_nodes
         ]
         if vectors:
             await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
 
         return len(vectors)
 
-    async def fetch_raw(self, notebook_id: str, text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    async def fetch_raw(
+        self,
+        notebook_id: str,
+        text: str,
+        top_k: int = 10,
+        topic_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         FIXED: Now uses LlamaIndex's internal retriever logic to ensure 
         correct metadata mapping and scoring.
         """
+        # Topic filtering is handled by the raw Pinecone path because LlamaIndex
+        # metadata filter support varies by vector store adapter version.
+        if topic_id is not None:
+            query_embedding = await self.embedder.get_embedding(text, task_type="retrieval_query")
+            matches = self.vector_service.query_vectors(
+                query_embedding=query_embedding,
+                namespace=notebook_id,
+                top_k=top_k,
+                metadata_filter={"topic_id": int(topic_id)},
+            )
+            return matches[:top_k]
+
         # 1. Setup Vector Store
         vector_store = PineconeVectorStore(
             pinecone_index=self.vector_service.index,
