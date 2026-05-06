@@ -9,17 +9,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 db = DatabaseService()
 
 
-@router.get("/google/debug")
-async def google_auth_debug(workspace_id: str = "test123"):
-    """Temporary — shows the exact URL being sent to Google."""
-    from app.primitives.consolidation.google_auth import build_auth_url
-    import os
-    return {
-        "auth_url": build_auth_url(workspace_id),
-        "client_id_set": bool(os.getenv("GOOGLE_CLIENT_ID")),
-        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI"),
-    }
-
 
 @router.get("/google")
 async def google_auth(workspace_id: str):
