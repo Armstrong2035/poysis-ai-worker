@@ -20,7 +20,9 @@ class SnapshotRunner:
     def __init__(self, scope: ScopeConfig):
         self.scope = scope
         self.docs_processed = 0
+        self.docs_skipped = 0
         self.errors: List[str] = []
+        self.completed_files: List[dict] = []  # flushed to DB after each batch
         self._doc_processor = DocumentProcessor()
         self._sheet_processor = SpreadsheetProcessor()
         self._pdf_processor = PDFProcessor()
@@ -56,11 +58,16 @@ class SnapshotRunner:
         if "google_drive" in self.scope.sources:
             connector = GoogleDriveConnector(access_token=self.scope.google_access_token or "")
             async for item in connector.list_items(self.scope):
+                indexed_etag = self.scope.indexed_files.get(item.source_id)
+                if indexed_etag and indexed_etag == item.etag:
+                    self.docs_skipped += 1
+                    continue
                 try:
                     chunks = await self._process_item(item, connector)
                     for chunk in chunks:
                         yield chunk
                     self.docs_processed += 1
+                    self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
                 except Exception as e:
                     self.errors.append(f"[{item.source_id}] {item.title}: {e}")
 

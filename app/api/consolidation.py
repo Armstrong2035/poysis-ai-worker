@@ -11,7 +11,7 @@ from app.primitives.consolidation.google_auth import get_valid_token
 
 router = APIRouter(prefix="/consolidation", tags=["consolidation"])
 db = DatabaseService()
-engine = ConsolidationEngine()
+engine = ConsolidationEngine(db=db)
 
 # In-memory job tracker — resets on redeploy, sufficient for now
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -71,6 +71,8 @@ async def run_snapshot(req: SnapshotRequest, background_tasks: BackgroundTasks):
             detail="No Google token found for this workspace. Complete OAuth first."
         )
 
+    indexed_files = await db.get_indexed_files(workspace_id)
+
     scope = ScopeConfig(
         workspace_id=workspace_id,
         sources=req.sources,
@@ -79,6 +81,7 @@ async def run_snapshot(req: SnapshotRequest, background_tasks: BackgroundTasks):
         drive_folder_ids=req.drive_folder_ids,
         cluster_instructions=req.cluster_instructions,
         google_access_token=access_token,
+        indexed_files=indexed_files,
     )
 
     background_tasks.add_task(_run_snapshot_job, workspace_id, scope)

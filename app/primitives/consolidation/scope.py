@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, field_validator
 
 
@@ -13,7 +13,8 @@ class ScopeConfig(BaseModel):
     sync_frequency: Literal["manual", "weekly", "daily"] = "manual"
     google_access_token: Optional[str] = None
     google_refresh_token: Optional[str] = None
-    cluster_instructions: List[dict] = []   # optional topic hints from client onboarding
+    cluster_instructions: List[dict] = []
+    indexed_files: Dict[str, str] = {}  # source_id -> etag (modifiedTime)
 
     @field_validator("sources")
     @classmethod

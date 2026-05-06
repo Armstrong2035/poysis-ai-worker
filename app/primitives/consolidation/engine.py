@@ -1,9 +1,10 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
 from app.primitives.consolidation.processors.base import ProcessedChunk
 from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.database import DatabaseService
 from llama_index.core import Document
 
 BATCH_SIZE = 50
@@ -15,8 +16,9 @@ class ConsolidationEngine:
     Only one batch lives in memory at a time — fetch, embed, discard, repeat.
     """
 
-    def __init__(self):
+    def __init__(self, db: Optional[DatabaseService] = None):
         self.knowledge = KnowledgeEngine()
+        self.db = db
 
     def _namespace(self, workspace_id: str) -> str:
         return f"consolidation_{workspace_id}"
@@ -59,6 +61,7 @@ class ConsolidationEngine:
                 total_vectors += indexed
                 batch_number += 1
                 print(f"[ConsolidationEngine] Batch {batch_number} — {indexed} vectors indexed")
+                await self._flush_completed_files(scope.workspace_id, runner)
                 batch.clear()
 
         # Embed any remaining chunks
@@ -67,11 +70,18 @@ class ConsolidationEngine:
             indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, chunk=False)
             total_vectors += indexed
             print(f"[ConsolidationEngine] Final batch — {indexed} vectors indexed")
+            await self._flush_completed_files(scope.workspace_id, runner)
 
         return {
             "workspace_id": scope.workspace_id,
             "docs_processed": runner.docs_processed,
+            "docs_skipped": runner.docs_skipped,
             "chunks_produced": total_chunks,
             "vectors_indexed": total_vectors,
             "errors": runner.errors,
         }
+
+    async def _flush_completed_files(self, workspace_id: str, runner: SnapshotRunner):
+        if self.db and runner.completed_files:
+            await self.db.mark_files_indexed(workspace_id, runner.completed_files.copy())
+            runner.completed_files.clear()

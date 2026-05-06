@@ -161,6 +161,37 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to fetch recent searches: {e}")
             return []
 
+    async def get_indexed_files(self, workspace_id: str) -> dict:
+        """Return {source_id: etag} for all files already indexed for a workspace."""
+        if not self.client:
+            return {}
+        try:
+            res = (
+                self.client.table("consolidation_indexed_files")
+                .select("source_id, etag")
+                .eq("workspace_id", workspace_id)
+                .execute()
+            )
+            return {row["source_id"]: row["etag"] for row in res.data}
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch indexed files: {e}")
+            return {}
+
+    async def mark_files_indexed(self, workspace_id: str, files: list) -> None:
+        """Upsert a batch of {source_id, etag} records as indexed for a workspace."""
+        if not self.client or not files:
+            return
+        try:
+            rows = [
+                {"workspace_id": workspace_id, "source_id": f["source_id"], "etag": f["etag"]}
+                for f in files
+            ]
+            self.client.table("consolidation_indexed_files").upsert(
+                rows, on_conflict="workspace_id,source_id"
+            ).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to mark files indexed: {e}")
+
     async def get_raw_logs(self, workspace_id: str, start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100, offset: int = 0) -> list:
         """
         Fetch raw, paginated search logs for a workspace, joining any associated attribution events.
