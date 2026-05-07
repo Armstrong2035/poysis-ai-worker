@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
@@ -42,7 +42,11 @@ class ConsolidationEngine:
             for i, chunk in enumerate(chunks)
         ]
 
-    async def run_snapshot(self, scope: ScopeConfig) -> Dict[str, Any]:
+    async def run_snapshot(
+        self,
+        scope: ScopeConfig,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
         runner = SnapshotRunner(scope=scope)
         namespace = self._namespace(scope.workspace_id)
 
@@ -63,6 +67,13 @@ class ConsolidationEngine:
                 print(f"[ConsolidationEngine] Batch {batch_number} — {indexed} vectors indexed")
                 await self._flush_completed_files(scope.workspace_id, runner)
                 batch.clear()
+                if progress_callback:
+                    progress_callback({
+                        "vectors_indexed": total_vectors,
+                        "docs_processed": runner.docs_processed,
+                        "docs_skipped": runner.docs_skipped,
+                        "docs_orphaned": runner.docs_orphaned,
+                    })
 
         # Embed any remaining chunks
         if batch:
@@ -71,11 +82,19 @@ class ConsolidationEngine:
             total_vectors += indexed
             print(f"[ConsolidationEngine] Final batch — {indexed} vectors indexed")
             await self._flush_completed_files(scope.workspace_id, runner)
+            if progress_callback:
+                progress_callback({
+                    "vectors_indexed": total_vectors,
+                    "docs_processed": runner.docs_processed,
+                    "docs_skipped": runner.docs_skipped,
+                    "docs_orphaned": runner.docs_orphaned,
+                })
 
         return {
             "workspace_id": scope.workspace_id,
             "docs_processed": runner.docs_processed,
             "docs_skipped": runner.docs_skipped,
+            "docs_orphaned": runner.docs_orphaned,
             "chunks_produced": total_chunks,
             "vectors_indexed": total_vectors,
             "errors": runner.errors,

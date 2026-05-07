@@ -31,6 +31,7 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
     total_vectors = 0
     total_docs = 0
     total_skipped = 0
+    total_orphaned = 0
     all_errors = []
     iteration = 0
     current_scope = scope
@@ -39,11 +40,21 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
         while True:
             iteration += 1
             print(f"[Snapshot] Iteration {iteration} for workspace '{workspace_id}'")
-            result = await engine.run_snapshot(current_scope)
+
+            def _on_progress(p: dict):
+                _jobs[workspace_id].update({
+                    "vectors_indexed": total_vectors + p["vectors_indexed"],
+                    "docs_processed": total_docs + p["docs_processed"],
+                    "docs_skipped": total_skipped + p["docs_skipped"],
+                    "docs_orphaned": total_orphaned + p["docs_orphaned"],
+                })
+
+            result = await engine.run_snapshot(current_scope, progress_callback=_on_progress)
 
             total_vectors += result["vectors_indexed"]
             total_docs += result["docs_processed"]
             total_skipped += result.get("docs_skipped", 0)
+            total_orphaned += result.get("docs_orphaned", 0)
             all_errors.extend(result.get("errors", []))
 
             if not result.get("partial"):
@@ -62,6 +73,7 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
             "vectors_indexed": total_vectors,
             "docs_processed": total_docs,
             "docs_skipped": total_skipped,
+            "docs_orphaned": total_orphaned,
             "errors": all_errors,
             "iterations": iteration,
         }
