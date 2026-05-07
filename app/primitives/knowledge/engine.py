@@ -49,9 +49,9 @@ class KnowledgeEngine:
 
     async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
-        Core ingestion pipeline using LlamaIndex for embedding, enriches chunks
-        with BERTopic topic metadata, then upserts via VectorService directly to
-        avoid llama_index's PineconeVectorStore hanging indefinitely on async_add.
+        Core ingestion pipeline using LlamaIndex for embedding, then upserts via
+        VectorService directly to avoid llama_index's PineconeVectorStore hanging
+        indefinitely on async_add with no timeout.
         Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
