@@ -55,6 +55,7 @@ class KnowledgeEngine:
         Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
+        import time
 
         # 1. Setup Embedding Model (Gemini)
         embed_model = GeminiEmbedding(
@@ -70,9 +71,16 @@ class KnowledgeEngine:
 
         pipeline = IngestionPipeline(transformations=transformations)
 
-        # 3. Embed (Async)
+        # 3. Embed (Async) — timed
+        doc_count = len(documents)
+        print(f"[KnowledgeEngine] Embedding {doc_count} doc(s) in namespace '{notebook_id}'...")
+        t0 = time.perf_counter()
         nodes = await pipeline.arun(documents=documents, show_progress=True)
+        embed_secs = time.perf_counter() - t0
         embedded_nodes = [node for node in nodes if node.embedding]
+        chunks = len(embedded_nodes)
+        rate = chunks / embed_secs if embed_secs > 0 else 0
+        print(f"[KnowledgeEngine] Embedded {chunks} chunks in {embed_secs:.1f}s ({rate:.1f} chunks/s)")
 
         # 4. Upsert via VectorService — strip None values Pinecone rejects
         vectors = [
@@ -84,7 +92,10 @@ class KnowledgeEngine:
             for node in embedded_nodes
         ]
         if vectors:
+            t1 = time.perf_counter()
             await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
+            upsert_secs = time.perf_counter() - t1
+            print(f"[KnowledgeEngine] Upserted {len(vectors)} vectors in {upsert_secs:.1f}s")
 
         return len(vectors)
 
