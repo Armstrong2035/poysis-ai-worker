@@ -18,6 +18,7 @@ class KnowledgeEngine:
     """
     The Unified Knowledge Engine (Core Memory).
     Consolidates embedding generation and vector storage into a single capability.
+    BERTopic clustering runs as a separate post-snapshot step via ConsolidationEngine.
     """
     def __init__(self):
         self.embedder = Embedder()
@@ -48,9 +49,9 @@ class KnowledgeEngine:
 
     async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
-        Core ingestion pipeline using LlamaIndex for embedding, then upserts via
-        VectorService directly to avoid llama_index's PineconeVectorStore hanging
-        indefinitely on async_add with no timeout.
+        Core ingestion pipeline using LlamaIndex for embedding, enriches chunks
+        with BERTopic topic metadata, then upserts via VectorService directly to
+        avoid llama_index's PineconeVectorStore hanging indefinitely on async_add.
         Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
@@ -71,6 +72,7 @@ class KnowledgeEngine:
 
         # 3. Embed (Async)
         nodes = await pipeline.arun(documents=documents, show_progress=True)
+        embedded_nodes = [node for node in nodes if node.embedding]
 
         # 4. Upsert via VectorService — strip None values Pinecone rejects
         vectors = [
@@ -79,19 +81,36 @@ class KnowledgeEngine:
                 "values": node.embedding,
                 "metadata": {k: v for k, v in node.metadata.items() if v is not None},
             }
-            for node in nodes
-            if node.embedding
+            for node in embedded_nodes
         ]
         if vectors:
             await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
 
         return len(vectors)
 
-    async def fetch_raw(self, notebook_id: str, text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    async def fetch_raw(
+        self,
+        notebook_id: str,
+        text: str,
+        top_k: int = 10,
+        topic_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """
         FIXED: Now uses LlamaIndex's internal retriever logic to ensure 
         correct metadata mapping and scoring.
         """
+        # Topic filtering is handled by the raw Pinecone path because LlamaIndex
+        # metadata filter support varies by vector store adapter version.
+        if topic_id is not None:
+            query_embedding = await self.embedder.get_embedding(text, task_type="retrieval_query")
+            matches = self.vector_service.query_vectors(
+                query_embedding=query_embedding,
+                namespace=notebook_id,
+                top_k=top_k,
+                metadata_filter={"topic_id": int(topic_id)},
+            )
+            return matches[:top_k]
+
         # 1. Setup Vector Store
         vector_store = PineconeVectorStore(
             pinecone_index=self.vector_service.index,

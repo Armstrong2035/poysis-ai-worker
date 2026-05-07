@@ -1,7 +1,7 @@
 import os
 import time
 from pinecone import Pinecone, ServerlessSpec
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Maximum number of candidates fetched from Pinecone before score-gap trimming
 _CANDIDATE_CEILING = 50
@@ -66,14 +66,24 @@ class VectorService:
                 print(f"[VECTOR ERROR] Failed to upsert batch {batch_num}: {e}")
                 raise e
 
-    def query_vectors(self, query_embedding: List[float], namespace: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def query_vectors(
+        self,
+        query_embedding: List[float],
+        namespace: str,
+        top_k: int = 5,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Searches Pinecone for similar vectors within a specific namespace."""
-        results = self.index.query(
-            vector=query_embedding,
-            top_k=_CANDIDATE_CEILING,
-            include_metadata=True,
-            namespace=namespace
-        )
+        query_kwargs = {
+            "vector": query_embedding,
+            "top_k": max(top_k, _CANDIDATE_CEILING),
+            "include_metadata": True,
+            "namespace": namespace,
+        }
+        if metadata_filter:
+            query_kwargs["filter"] = metadata_filter
+
+        results = self.index.query(**query_kwargs)
 
         matches = []
         for match in results.get("matches", []):
@@ -82,7 +92,7 @@ class VectorService:
                 "score": match.score,
                 "metadata": match.metadata
             })
-        return matches
+        return matches[:top_k]
 
     @staticmethod
     def detect_score_gap(matches: List[Dict[str, Any]], min_results: int = 5) -> List[Dict[str, Any]]:
