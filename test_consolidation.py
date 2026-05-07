@@ -2,7 +2,7 @@ import httpx
 import json
 import time
 
-BASE_URL = "https://poysis-ai-worker.onrender.com"
+BASE_URL = "https://poysis-ai-worker-production.up.railway.app"
 WORKSPACE_ID = "test123"
 
 
