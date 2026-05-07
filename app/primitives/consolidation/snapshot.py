@@ -21,6 +21,7 @@ class SnapshotRunner:
         self.scope = scope
         self.docs_processed = 0
         self.docs_skipped = 0
+        self.has_more = False
         self.errors: List[str] = []
         self.completed_files: List[dict] = []  # flushed to DB after each batch
         self._doc_processor = DocumentProcessor()
@@ -54,10 +55,13 @@ class SnapshotRunner:
         """
         Async generator — yields chunks one at a time as each doc is processed.
         Tracks stats on self.docs_processed and self.errors.
+        Sets self.has_more = True if the connector was cut short by doc_limit.
         """
         if "google_drive" in self.scope.sources:
             connector = GoogleDriveConnector(access_token=self.scope.google_access_token or "")
+            items_seen = 0
             async for item in connector.list_items(self.scope):
+                items_seen += 1
                 indexed_etag = self.scope.indexed_files.get(item.source_id)
                 if indexed_etag and indexed_etag == item.etag:
                     self.docs_skipped += 1
@@ -70,6 +74,9 @@ class SnapshotRunner:
                     self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
                 except Exception as e:
                     self.errors.append(f"[{item.source_id}] {item.title}: {e}")
+
+            if self.scope.doc_limit > 0 and items_seen >= self.scope.doc_limit:
+                self.has_more = True
 
     async def _process_item(self, item: RawSourceItem, connector: GoogleDriveConnector) -> List[ProcessedChunk]:
         if item.content_type == "document":

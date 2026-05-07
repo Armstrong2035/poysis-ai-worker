@@ -79,6 +79,7 @@ class ConsolidationEngine:
             "chunks_produced": total_chunks,
             "vectors_indexed": total_vectors,
             "errors": runner.errors,
+            "partial": runner.has_more,
         }
 
     async def _flush_completed_files(self, workspace_id: str, runner: SnapshotRunner):
