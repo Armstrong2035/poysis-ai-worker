@@ -34,8 +34,8 @@ class ConsolidationEngine:
                     "title": chunk.title,
                     "url": chunk.url,
                     **({
-                        "page": chunk.extra_metadata["page"],
-                        "total_pages": chunk.extra_metadata["total_pages"],
+                        "page": chunk.extra_metadata.get("page"),
+                        "total_pages": chunk.extra_metadata.get("total_pages"),
                     } if chunk.extra_metadata.get("page") else {}),
                 }
             )
