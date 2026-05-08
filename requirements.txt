@@ -11,7 +11,7 @@ cohere
 gunicorn
 python-multipart
 llama-index
-llama-index-embeddings-gemini
+llama-index-embeddings-openai
 llama-index-llms-google-genai
 llama-index-readers-file
 llama-parse

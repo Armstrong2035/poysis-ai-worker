@@ -7,7 +7,7 @@ from app.primitives.knowledge.vector_store import VectorService
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
-from llama_index.embeddings.gemini import GeminiEmbedding
+from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.readers import SimpleDirectoryReader
 from llama_parse import LlamaParse
@@ -21,9 +21,9 @@ class KnowledgeEngine:
     def __init__(self):
         self.embedder = Embedder()
         self.vector_service = VectorService()
-        self.embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001",
-            api_key=os.getenv("GEMINI_API_KEY")
+        self.embed_model = OpenAIEmbedding(
+            model="text-embedding-3-small",
+            api_key=os.getenv("OPENAI_API_KEY")
         )
 
     async def upsert_documents(self, notebook_id: str, documents: List[Dict[str, Any]]) -> int:
