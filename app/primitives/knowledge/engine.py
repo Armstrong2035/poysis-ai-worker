@@ -66,11 +66,22 @@ class KnowledgeEngine:
 
         pipeline = IngestionPipeline(transformations=transformations)
 
-        # 3. Embed (Async) — timed
+        # 3. Embed (Async) — timed, with retry on 429
         doc_count = len(documents)
         print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → Gemini embedding-001 | namespace='{notebook_id}'")
         t0 = time.perf_counter()
-        nodes = await pipeline.arun(documents=documents, show_progress=False)
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                nodes = await pipeline.arun(documents=documents, show_progress=False)
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s, 480s
+                    print(f"[STEP 3 EMBED ] Rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         embed_secs = time.perf_counter() - t0
         embedded_nodes = [node for node in nodes if node.embedding]
         chunks = len(embedded_nodes)
