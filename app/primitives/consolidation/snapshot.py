@@ -72,14 +72,18 @@ class SnapshotRunner:
 
     async def stream(self) -> AsyncIterator[ProcessedChunk]:
         """
-        Async generator — yields chunks one at a time as each doc is processed.
-        - Skips already-indexed files (etag match) and previously orphaned unchanged files.
-        - Caps chunks per doc at MAX_CHUNKS_PER_DOC.
-        - Orphans files that fail so they are not retried until the file changes.
+        Async generator — fetches and parses up to FETCH_CONCURRENCY docs in parallel,
+        yields chunks as each doc completes. Pipeline overlap is free: while the
+        ConsolidationEngine embeds batch N, workers are already fetching batch N+1.
         """
+        FETCH_CONCURRENCY = 5
+
         if "google_drive" in self.scope.sources:
             connector = GoogleDriveConnector(access_token=self.scope.google_access_token or "")
             items_seen = 0
+            pending = []
+
+            # Phase 1: list items and apply skip/orphan logic (fast, stays sequential)
             async for item in connector.list_items(self.scope):
                 items_seen += 1
                 indexed_etag = self.scope.indexed_files.get(item.source_id)
@@ -88,12 +92,10 @@ class SnapshotRunner:
                     if indexed_etag == item.etag:
                         self.docs_skipped += 1
                         continue
-                    # Previously orphaned — skip unless the file has changed
                     if indexed_etag.startswith("ORPHANED:") and indexed_etag[len("ORPHANED:"):] == item.etag:
                         self.docs_orphaned += 1
                         continue
 
-                # Auto-orphan files over the size threshold — retry automatically if file changes
                 if item.size_bytes >= SIZE_WARNING_BYTES:
                     print(f"[SnapshotRunner] '{item.title}' ({item.size_bytes / (1024*1024):.1f}MB) exceeds size threshold — orphaning")
                     self.errors.append(f"[{item.source_id}] {item.title}: file too large ({item.size_bytes / (1024*1024):.1f}MB), orphaned")
@@ -101,31 +103,51 @@ class SnapshotRunner:
                     self.docs_orphaned += 1
                     continue
 
-                try:
-                    import time
-                    size_kb = item.size_bytes / 1024
-                    print(f"[STEP 1 FETCH ] '{item.title}' | {size_kb:.1f}KB | type={item.content_type}")
-                    t0 = time.perf_counter()
-                    chunks = await self._process_item(item, connector)
-                    process_secs = time.perf_counter() - t0
-                    chunk_count = len(chunks)
-                    print(f"[STEP 2 PARSE ] '{item.title}' | {chunk_count} chunks | {process_secs:.2f}s")
-                    if chunk_count > MAX_CHUNKS_PER_DOC:
-                        print(f"[STEP 2 PARSE ] WARNING: {chunk_count} chunks exceeds {MAX_CHUNKS_PER_DOC} — large document, indexing in full")
-                    for chunk in chunks:
-                        yield chunk
-                    self.docs_processed += 1
-                    self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
-                    print(f"[STEP 2 PARSE ] '{item.title}' queued for embedding ✓")
-                except Exception as e:
-                    size_kb = item.size_bytes / 1024
-                    print(f"[STEP 1 FETCH ] FAILED '{item.title}' | {size_kb:.1f}KB | {e}")
-                    self.errors.append(f"[{item.source_id}] {item.title}: {e}")
-                    # Orphan so we don't retry an unchanging broken file on every snapshot
-                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})
+                pending.append(item)
 
             if self.scope.doc_limit > 0 and items_seen >= self.scope.doc_limit:
                 self.has_more = True
+
+            if not pending:
+                return
+
+            # Phase 2: fetch + parse concurrently, yield chunks as each doc finishes
+            import time
+            sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def fetch_and_parse(item: RawSourceItem):
+                async with sem:
+                    try:
+                        size_kb = item.size_bytes / 1024
+                        print(f"[STEP 1 FETCH ] '{item.title}' | {size_kb:.1f}KB | type={item.content_type}")
+                        t0 = time.perf_counter()
+                        chunks = await self._process_item(item, connector)
+                        elapsed = time.perf_counter() - t0
+                        print(f"[STEP 2 PARSE ] '{item.title}' | {len(chunks)} chunks | {elapsed:.2f}s")
+                        if len(chunks) > MAX_CHUNKS_PER_DOC:
+                            print(f"[STEP 2 PARSE ] WARNING: {len(chunks)} chunks — large document, indexing in full")
+                        await queue.put((item, chunks, None))
+                    except Exception as e:
+                        print(f"[STEP 1 FETCH ] FAILED '{item.title}' | {e}")
+                        await queue.put((item, None, e))
+
+            tasks = [asyncio.create_task(fetch_and_parse(item)) for item in pending]
+
+            for _ in range(len(pending)):
+                item, chunks, error = await queue.get()
+                if error is not None:
+                    self.errors.append(f"[{item.source_id}] {item.title}: {error}")
+                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})
+                    continue
+                for chunk in chunks:
+                    yield chunk
+                self.docs_processed += 1
+                self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
+                print(f"[STEP 2 PARSE ] '{item.title}' queued for embedding ✓")
+
+            # Ensure all tasks are awaited even if queue consumed early
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _process_item(self, item: RawSourceItem, connector: GoogleDriveConnector) -> List[ProcessedChunk]:
         if item.content_type == "document":
