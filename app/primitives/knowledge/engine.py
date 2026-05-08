@@ -23,7 +23,8 @@ class KnowledgeEngine:
         self.vector_service = VectorService()
         self.embed_model = OpenAIEmbedding(
             model="text-embedding-3-small",
-            api_key=os.getenv("OPENAI_API_KEY")
+            api_key=os.getenv("OPENAI_API_KEY"),
+            embed_batch_size=512,
         )
 
     async def upsert_documents(self, notebook_id: str, documents: List[Dict[str, Any]]) -> int:
