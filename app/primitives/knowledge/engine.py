@@ -58,40 +58,34 @@ class KnowledgeEngine:
         import asyncio
         import time
 
-        # Always chunk — SentenceSplitter keeps short docs/rows intact and safely
-        # splits anything that would exceed OpenAI's 8192-token per-input limit.
-        pipeline = IngestionPipeline(transformations=[
-            SentenceSplitter(chunk_size=512, chunk_overlap=50),
-            self.embed_model,
-        ])
+        # Step 1: chunk with SentenceSplitter (CPU-only, fast)
+        splitter = SentenceSplitter(chunk_size=512, chunk_overlap=50)
+        nodes = splitter.get_nodes_from_documents(documents)
 
-        # 3. Embed (Async) — timed, with retry on 429
-        doc_count = len(documents)
+        # Step 2: batch embed directly — bypasses IngestionPipeline's one-at-a-time behaviour
+        texts = [node.get_content() for node in nodes]
+        doc_count = len(texts)
         print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → text-embedding-3-small | namespace='{notebook_id}'")
         t0 = time.perf_counter()
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                nodes = await pipeline.arun(documents=documents, show_progress=False)
+                embeddings = await self.embed_model.aget_text_embedding_batch(texts, show_progress=False)
                 break
             except Exception as e:
                 if "429" in str(e) and attempt < max_retries - 1:
-                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s, 480s
+                    wait = 30 * (2 ** attempt)
                     print(f"[STEP 3 EMBED ] Rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait)
                 else:
                     raise
         embed_secs = time.perf_counter() - t0
-        embedded_nodes = [node for node in nodes if node.embedding]
+        for node, embedding in zip(nodes, embeddings):
+            node.embedding = embedding
+        embedded_nodes = [n for n in nodes if n.embedding]
         chunks = len(embedded_nodes)
         rate = chunks / embed_secs if embed_secs > 0 else 0
         print(f"[STEP 3 EMBED ] done — {chunks} vectors | {embed_secs:.1f}s | {rate:.1f} chunks/s")
-
-        # Truncate any nodes whose text exceeds OpenAI's 8192-token limit (~32k chars)
-        _MAX_CHARS = 30000
-        for node in embedded_nodes:
-            if len(node.get_content()) > _MAX_CHARS:
-                node.text = node.get_content()[:_MAX_CHARS]
 
         # 4. Upsert via VectorService — include _text so retrieval doesn't need a separate store
         vectors = [
