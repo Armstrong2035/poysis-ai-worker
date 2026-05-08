@@ -67,18 +67,24 @@ class KnowledgeEngine:
         doc_count = len(texts)
         print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → text-embedding-3-small | namespace='{notebook_id}'")
         t0 = time.perf_counter()
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                embeddings = await self.embed_model.aget_text_embedding_batch(texts, show_progress=False)
-                break
-            except Exception as e:
-                if "429" in str(e) and attempt < max_retries - 1:
-                    wait = 30 * (2 ** attempt)
-                    print(f"[STEP 3 EMBED ] Rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(wait)
-                else:
-                    raise
+        # Sub-batch to stay under OpenAI's 40k TPM limit (~512 tokens/chunk × 50 = 25k max)
+        SUB_BATCH = 50
+        embeddings = []
+        for i in range(0, len(texts), SUB_BATCH):
+            sub = texts[i:i + SUB_BATCH]
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    result = await self.embed_model.aget_text_embedding_batch(sub, show_progress=False)
+                    embeddings.extend(result)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < max_retries - 1:
+                        wait = 30 * (2 ** attempt)
+                        print(f"[STEP 3 EMBED ] Rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
         embed_secs = time.perf_counter() - t0
         for node, embedding in zip(nodes, embeddings):
             node.embedding = embedding
