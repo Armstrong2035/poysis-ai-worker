@@ -7,7 +7,7 @@ from app.primitives.knowledge.engine import KnowledgeEngine
 from app.primitives.database import DatabaseService
 from llama_index.core import Document
 
-BATCH_SIZE = 50
+BATCH_SIZE = 200
 
 
 class ConsolidationEngine:

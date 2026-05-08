@@ -5,12 +5,12 @@ pydantic
 google-generativeai
 python-dotenv
 supabase
-pinecone
+psycopg2-binary
+pgvector
 cohere
 gunicorn
 python-multipart
 llama-index
-llama-index-vector-stores-pinecone
 llama-index-embeddings-gemini
 llama-index-llms-google-genai
 llama-index-readers-file

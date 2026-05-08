@@ -1,70 +1,60 @@
 import os
-import time
-from pinecone import Pinecone, ServerlessSpec
+import json
+import psycopg2
+from psycopg2.extras import execute_values
 from typing import List, Dict, Any, Optional
 
-# Maximum number of candidates fetched from Pinecone before score-gap trimming
 _CANDIDATE_CEILING = 50
+
 
 class VectorService:
     def __init__(self):
-        self.api_key = os.getenv("PINE_CONE_API_KEY")
-        self.index_name = "poysis-gemini"
-        
-        if not self.api_key:
-            raise ValueError("PINE_CONE_API_KEY not found in environment")
-            
-        self.pc = Pinecone(api_key=self.api_key)
-        # Lazy — don't connect to the index until first use
-        self._index = None
+        self.conn_str = os.getenv("SUPABASE_DIRECT_CONNECTION_STRING")
+        if not self.conn_str:
+            raise ValueError("SUPABASE_DIRECT_CONNECTION_STRING not found in environment")
 
-    @property
-    def index(self):
-        """Connect to Pinecone index on first access, not at startup."""
-        if self._index is None:
-            self._ensure_index_exists()
-            self._index = self.pc.Index(self.index_name)
-        return self._index
-
-    def _ensure_index_exists(self):
-        """Creates the index if it doesn't already exist."""
-        existing_indexes = [idx.name for idx in self.pc.list_indexes()]
-        
-        if self.index_name not in existing_indexes:
-            print(f"[VECTOR] Creating new Pinecone index: {self.index_name}")
-            self.pc.create_index(
-                name=self.index_name,
-                dimension=3072, # Gemini embedding-001 dimension
-                metric="cosine",
-                spec=ServerlessSpec(
-                    cloud="aws",
-                    region="us-east-1"
-                )
-            )
-            while not self.pc.describe_index(self.index_name).status['ready']:
-                time.sleep(1)
-        else:
-            print(f"[VECTOR] Connected to existing Pinecone index: {self.index_name}")
+    def _get_conn(self):
+        return psycopg2.connect(self.conn_str)
 
     def upsert_vectors(self, vectors: List[Dict[str, Any]], namespace: str, batch_size: int = 100):
-        """Pushes embeddings to Pinecone with metadata in a specific namespace.
-        Uses batching to stay within Pinecone's 2MB request size limit.
-        """
-        total_vectors = len(vectors)
-        print(f"[VECTOR] Upserting {total_vectors} vectors to namespace '{namespace}' (Batch Size: {batch_size})...")
-        
-        for i in range(0, total_vectors, batch_size):
-            batch = vectors[i : i + batch_size]
-            batch_num = (i // batch_size) + 1
-            total_batches = (total_vectors + batch_size - 1) // batch_size
-            
-            print(f"[VECTOR]   -> Sending batch {batch_num}/{total_batches} ({len(batch)} vectors)...")
-            try:
-                self.index.upsert(vectors=batch, namespace=namespace, show_progress=False)
-                print(f"[VECTOR]   -> Batch {batch_num} OK")
-            except Exception as e:
-                print(f"[VECTOR ERROR] Failed to upsert batch {batch_num}: {e}")
-                raise e
+        total = len(vectors)
+        print(f"[VECTOR] Upserting {total} vectors to namespace '{namespace}'...")
+
+        conn = self._get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    for i in range(0, total, batch_size):
+                        batch = vectors[i:i + batch_size]
+                        batch_num = (i // batch_size) + 1
+                        total_batches = (total + batch_size - 1) // batch_size
+
+                        rows = [
+                            (
+                                v["id"],
+                                namespace,
+                                "[" + ",".join(str(x) for x in v["values"]) + "]",
+                                json.dumps(v.get("metadata", {})),
+                            )
+                            for v in batch
+                        ]
+
+                        execute_values(
+                            cur,
+                            """
+                            INSERT INTO vectors (id, namespace, embedding, metadata)
+                            VALUES %s
+                            ON CONFLICT (id) DO UPDATE SET
+                                namespace = EXCLUDED.namespace,
+                                embedding = EXCLUDED.embedding,
+                                metadata = EXCLUDED.metadata
+                            """,
+                            rows,
+                            template="(%s, %s, %s::vector, %s::jsonb)"
+                        )
+                        print(f"[VECTOR]   -> Batch {batch_num}/{total_batches} OK")
+        finally:
+            conn.close()
 
     def query_vectors(
         self,
@@ -73,30 +63,46 @@ class VectorService:
         top_k: int = 5,
         metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Searches Pinecone for similar vectors within a specific namespace."""
-        query_kwargs = {
-            "vector": query_embedding,
-            "top_k": max(top_k, _CANDIDATE_CEILING),
-            "include_metadata": True,
-            "namespace": namespace,
-        }
-        if metadata_filter:
-            query_kwargs["filter"] = metadata_filter
+        limit = max(top_k, _CANDIDATE_CEILING)
+        vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-        results = self.index.query(**query_kwargs)
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                if metadata_filter:
+                    cur.execute(
+                        """
+                        SELECT id, metadata, 1 - (embedding <=> %s::vector) AS score
+                        FROM vectors
+                        WHERE namespace = %s AND metadata @> %s::jsonb
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        [vec_str, namespace, json.dumps(metadata_filter), vec_str, limit]
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, metadata, 1 - (embedding <=> %s::vector) AS score
+                        FROM vectors
+                        WHERE namespace = %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        [vec_str, namespace, vec_str, limit]
+                    )
 
-        matches = []
-        for match in results.get("matches", []):
-            matches.append({
-                "id": match.id,
-                "score": match.score,
-                "metadata": match.metadata
-            })
-        return matches[:top_k]
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        return [
+            {"id": row[0], "metadata": row[1] or {}, "score": float(row[2])}
+            for row in rows
+        ][:top_k]
 
     @staticmethod
     def detect_score_gap(matches: List[Dict[str, Any]], min_results: int = 5) -> List[Dict[str, Any]]:
-        """Trims results at the natural cluster boundary."""
         if len(matches) <= min_results:
             return matches
 
@@ -108,7 +114,16 @@ class VectorService:
         print(f"[VECTOR] Score gap cut: keeping {cut}/{len(matches)} candidates")
         return matches[:cut]
 
-    def delete_all(self):
-        """Purges the index."""
-        print("[VECTOR] Purging index...")
-        self.index.delete(delete_all=True)
+    def delete_all(self, namespace: Optional[str] = None):
+        conn = self._get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    if namespace:
+                        cur.execute("DELETE FROM vectors WHERE namespace = %s", [namespace])
+                        print(f"[VECTOR] Purged namespace '{namespace}'")
+                    else:
+                        cur.execute("DELETE FROM vectors")
+                        print("[VECTOR] Purged all vectors")
+        finally:
+            conn.close()

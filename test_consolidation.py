@@ -31,7 +31,7 @@ def test_snapshot():
     # Kick off background job — returns immediately
     resp = httpx.post(
         f"{BASE_URL}/consolidation/snapshot",
-        json={"workspace_id": WORKSPACE_ID},
+        json={"workspace_id": WORKSPACE_ID, "time_window_days": 365},
         timeout=30,
     )
     print_response("SNAPSHOT START", resp)

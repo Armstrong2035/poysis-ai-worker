@@ -7,11 +7,9 @@ from app.primitives.knowledge.vector_store import VectorService
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
-from llama_index.vector_stores.pinecone import PineconeVectorStore
 from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.readers import SimpleDirectoryReader
-from llama_index.core import VectorStoreIndex, StorageContext
 from llama_parse import LlamaParse
 
 class KnowledgeEngine:
@@ -45,7 +43,7 @@ class KnowledgeEngine:
             )
             for doc in documents if doc.get("text") or doc.get("content")
         ]
-        
+
         if not llama_docs:
             return 0
 
@@ -54,14 +52,13 @@ class KnowledgeEngine:
     async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
         """
         Core ingestion pipeline using LlamaIndex for embedding, then upserts via
-        VectorService directly to avoid llama_index's PineconeVectorStore hanging
-        indefinitely on async_add with no timeout.
+        VectorService directly to Supabase pgvector.
         Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
         import time
 
-        # 1. Create Pipeline — embed only, no vector store (we upsert manually below)
+        # 1. Create Pipeline — embed only
         transformations = []
         if chunk:
             transformations.append(SentenceSplitter(chunk_size=512, chunk_overlap=50))
@@ -80,17 +77,20 @@ class KnowledgeEngine:
         rate = chunks / embed_secs if embed_secs > 0 else 0
         print(f"[STEP 3 EMBED ] done — {chunks} vectors | {embed_secs:.1f}s | {rate:.1f} chunks/s")
 
-        # 4. Upsert via VectorService — strip None values Pinecone rejects
+        # 4. Upsert via VectorService — include _text so retrieval doesn't need a separate store
         vectors = [
             {
                 "id": node.node_id,
                 "values": node.embedding,
-                "metadata": {k: v for k, v in node.metadata.items() if v is not None},
+                "metadata": {
+                    **{k: v for k, v in node.metadata.items() if v is not None},
+                    "_text": node.get_content(),
+                },
             }
             for node in embedded_nodes
         ]
         if vectors:
-            print(f"[STEP 4 UPSERT] {len(vectors)} vectors → Pinecone | namespace='{notebook_id}'")
+            print(f"[STEP 4 UPSERT] {len(vectors)} vectors → Supabase pgvector | namespace='{notebook_id}'")
             t1 = time.perf_counter()
             await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
             upsert_secs = time.perf_counter() - t1
@@ -105,96 +105,72 @@ class KnowledgeEngine:
         top_k: int = 10,
         topic_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        FIXED: Now uses LlamaIndex's internal retriever logic to ensure 
-        correct metadata mapping and scoring.
-        """
-        # Topic filtering is handled by the raw Pinecone path because LlamaIndex
-        # metadata filter support varies by vector store adapter version.
-        if topic_id is not None:
-            query_embedding = await self.embedder.get_embedding(text, task_type="retrieval_query")
-            matches = self.vector_service.query_vectors(
-                query_embedding=query_embedding,
-                namespace=notebook_id,
-                top_k=top_k,
-                metadata_filter={"topic_id": int(topic_id)},
-            )
-            return matches[:top_k]
+        query_embedding = await self.embed_model.aget_query_embedding(text)
 
-        # 1. Setup Vector Store
-        vector_store = PineconeVectorStore(
-            pinecone_index=self.vector_service.index,
-            namespace=notebook_id
-        )
-        
-        # 2. Setup Embedder (Gemini)
-        embed_model = self.embed_model
+        metadata_filter = {"topic_id": topic_id} if topic_id is not None else None
 
-        # 3. Create Index and Retriever
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model
+        matches = self.vector_service.query_vectors(
+            query_embedding=query_embedding,
+            namespace=notebook_id,
+            top_k=top_k,
+            metadata_filter=metadata_filter,
         )
-        
-        # We fetch extra candidates to perform the same 'Score Gap' trimming Poysis likes
-        retriever = index.as_retriever(similarity_top_k=top_k * 2)
-        nodes = await retriever.aretrieve(text)
-        
-        # 4. Format for Poysis Blocks
+
         results = []
-        for node in nodes:
+        for match in matches:
+            metadata = match["metadata"] or {}
             results.append({
-                "id": node.node.node_id,
-                "score": node.score,
-                "metadata": node.node.metadata,
-                "text": node.node.get_content() # Always pulls full text
+                "id": match["id"],
+                "score": match["score"],
+                "metadata": {k: v for k, v in metadata.items() if k != "_text"},
+                "text": metadata.get("_text", ""),
             })
-        
+
         return results
 
     async def answer_question(self, notebook_id: str, query: str) -> Dict[str, Any]:
         """
-        THE INTELLIGENCE LAYER: Answers a direct question by synthesizing 
+        THE INTELLIGENCE LAYER: Answers a direct question by synthesizing
         information from the relevant document chunks.
         """
-        # 1. Setup Retrieval Components
-        vector_store = PineconeVectorStore(
-            pinecone_index=self.vector_service.index,
-            namespace=notebook_id
-        )
-        
-        embed_model = self.embed_model
+        # 1. Retrieve relevant chunks
+        chunks = await self.fetch_raw(notebook_id, query, top_k=3)
 
-        # 2. Setup Reasoning Engine (Gemini 3 Flash via google-genai)
+        if not chunks:
+            return {"answer": "No relevant information found in this notebook.", "sources": []}
+
+        # 2. Build context
+        context_parts = [
+            f"[Source: {c['metadata'].get('source_file', 'unknown')}]\n{c['text']}"
+            for c in chunks
+        ]
+        context = "\n\n---\n\n".join(context_parts)
+
+        prompt = (
+            "Answer the following question based on the provided context. "
+            "If the context does not contain enough information, say so.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            "Answer:"
+        )
+
+        # 3. Call Gemini
         llm = GoogleGenAI(
-            model="gemini-3-flash-preview",
+            model="gemini-2.0-flash",
             api_key=os.getenv("GEMINI_API_KEY")
         )
 
-        # 3. Create Query Engine (top_k=3 for speed without significant quality loss)
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model
-        )
-        
-        query_engine = index.as_query_engine(
-            llm=llm,
-            similarity_top_k=3,
-            streaming=False
-        )
-
-        # 4. Execute RAG
         print(f"[KnowledgeEngine] Reasoning across notebook '{notebook_id}' to answer: '{query}'")
-        response = await query_engine.aquery(query)
-        
-        # 5. Extract Citations
-        sources = []
-        for node in response.source_nodes:
-            sources.append({
-                "file": node.node.metadata.get("source_file"),
-                "score": node.score,
-                "snippet": node.node.get_content()[:200] + "..."
-            })
+        response = await llm.acomplete(prompt)
+
+        sources = [
+            {
+                "file": c["metadata"].get("source_file"),
+                "score": c["score"],
+                "snippet": c["text"][:200] + "..."
+            }
+            for c in chunks
+        ]
 
         return {
             "answer": str(response),
@@ -209,46 +185,45 @@ class KnowledgeEngine:
         """
         import json
 
-        # 1. Setup Components (same as answer_question)
-        vector_store = PineconeVectorStore(
-            pinecone_index=self.vector_service.index,
-            namespace=notebook_id
+        # 1. Retrieve relevant chunks
+        chunks = await self.fetch_raw(notebook_id, query, top_k=3)
+
+        # 2. Build context
+        context_parts = [
+            f"[Source: {c['metadata'].get('source_file', 'unknown')}]\n{c['text']}"
+            for c in chunks
+        ]
+        context = "\n\n---\n\n".join(context_parts) if context_parts else "No relevant context found."
+
+        prompt = (
+            "Answer the following question based on the provided context.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            "Answer:"
         )
-        embed_model = self.embed_model
+
+        # 3. Setup streaming LLM
         llm = GoogleGenAI(
-            model="gemini-3-flash-preview",
+            model="gemini-2.0-flash",
             api_key=os.getenv("GEMINI_API_KEY")
         )
 
-        # 2. Create Streaming Query Engine
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model
-        )
-        query_engine = index.as_query_engine(
-            llm=llm,
-            similarity_top_k=3,
-            streaming=True  # KEY: enables token streaming
-        )
-
         print(f"[KnowledgeEngine] Streaming answer for notebook '{notebook_id}'...")
-        
-        # 3. Stream tokens as they arrive
-        streaming_response = await query_engine.aquery(query)
-        
-        async for token in streaming_response.async_response_gen():
-            yield token
 
-        # 4. Yield sources as a final structured chunk
-        sources = []
-        for node in streaming_response.source_nodes:
-            sources.append({
-                "file": node.node.metadata.get("source_file"),
-                "score": node.score,
-                "snippet": node.node.get_content()[:200] + "..."
-            })
-        
-        # Signal end of stream with sources metadata
+        # 4. Stream tokens as they arrive
+        streaming_response = await llm.astream_complete(prompt)
+        async for delta in streaming_response:
+            yield delta.delta
+
+        # 5. Yield sources as a final structured chunk
+        sources = [
+            {
+                "file": c["metadata"].get("source_file"),
+                "score": c["score"],
+                "snippet": c["text"][:200] + "..."
+            }
+            for c in chunks
+        ]
         yield f"\n\n__SOURCES__{json.dumps(sources)}"
 
     async def ingest_file(self, notebook_id: str, file_path: str) -> int:
