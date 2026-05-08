@@ -104,20 +104,22 @@ class SnapshotRunner:
                 try:
                     import time
                     size_kb = item.size_bytes / 1024
+                    print(f"[STEP 1 FETCH ] '{item.title}' | {size_kb:.1f}KB | type={item.content_type}")
                     t0 = time.perf_counter()
                     chunks = await self._process_item(item, connector)
                     process_secs = time.perf_counter() - t0
                     chunk_count = len(chunks)
+                    print(f"[STEP 2 PARSE ] '{item.title}' | {chunk_count} chunks | {process_secs:.2f}s")
                     if chunk_count > MAX_CHUNKS_PER_DOC:
-                        print(f"[SnapshotRunner] '{item.title}': {chunk_count} chunks — large document, indexing in full")
-                    print(f"[SnapshotRunner] OK  '{item.title}' | {size_kb:.1f}KB | {chunk_count} chunks | parsed in {process_secs:.2f}s")
+                        print(f"[STEP 2 PARSE ] WARNING: {chunk_count} chunks exceeds {MAX_CHUNKS_PER_DOC} — large document, indexing in full")
                     for chunk in chunks:
                         yield chunk
                     self.docs_processed += 1
                     self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
+                    print(f"[STEP 2 PARSE ] '{item.title}' queued for embedding ✓")
                 except Exception as e:
                     size_kb = item.size_bytes / 1024
-                    print(f"[SnapshotRunner] FAIL '{item.title}' | {size_kb:.1f}KB | {e}")
+                    print(f"[STEP 1 FETCH ] FAILED '{item.title}' | {size_kb:.1f}KB | {e}")
                     self.errors.append(f"[{item.source_id}] {item.title}: {e}")
                     # Orphan so we don't retry an unchanging broken file on every snapshot
                     self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})

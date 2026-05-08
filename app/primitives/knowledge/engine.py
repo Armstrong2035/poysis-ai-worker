@@ -23,6 +23,10 @@ class KnowledgeEngine:
     def __init__(self):
         self.embedder = Embedder()
         self.vector_service = VectorService()
+        self.embed_model = GeminiEmbedding(
+            model_name="models/gemini-embedding-001",
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
 
     async def upsert_documents(self, notebook_id: str, documents: List[Dict[str, Any]]) -> int:
         """
@@ -57,30 +61,24 @@ class KnowledgeEngine:
         import asyncio
         import time
 
-        # 1. Setup Embedding Model (Gemini)
-        embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
-
-        # 2. Create Pipeline — embed only, no vector store (we upsert manually below)
+        # 1. Create Pipeline — embed only, no vector store (we upsert manually below)
         transformations = []
         if chunk:
             transformations.append(SentenceSplitter(chunk_size=512, chunk_overlap=50))
-        transformations.append(embed_model)
+        transformations.append(self.embed_model)
 
         pipeline = IngestionPipeline(transformations=transformations)
 
         # 3. Embed (Async) — timed
         doc_count = len(documents)
-        print(f"[KnowledgeEngine] Embedding {doc_count} doc(s) in namespace '{notebook_id}'...")
+        print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → Gemini embedding-001 | namespace='{notebook_id}'")
         t0 = time.perf_counter()
-        nodes = await pipeline.arun(documents=documents, show_progress=True)
+        nodes = await pipeline.arun(documents=documents, show_progress=False)
         embed_secs = time.perf_counter() - t0
         embedded_nodes = [node for node in nodes if node.embedding]
         chunks = len(embedded_nodes)
         rate = chunks / embed_secs if embed_secs > 0 else 0
-        print(f"[KnowledgeEngine] Embedded {chunks} chunks in {embed_secs:.1f}s ({rate:.1f} chunks/s)")
+        print(f"[STEP 3 EMBED ] done — {chunks} vectors | {embed_secs:.1f}s | {rate:.1f} chunks/s")
 
         # 4. Upsert via VectorService — strip None values Pinecone rejects
         vectors = [
@@ -92,10 +90,11 @@ class KnowledgeEngine:
             for node in embedded_nodes
         ]
         if vectors:
+            print(f"[STEP 4 UPSERT] {len(vectors)} vectors → Pinecone | namespace='{notebook_id}'")
             t1 = time.perf_counter()
             await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
             upsert_secs = time.perf_counter() - t1
-            print(f"[KnowledgeEngine] Upserted {len(vectors)} vectors in {upsert_secs:.1f}s")
+            print(f"[STEP 4 UPSERT] done — {upsert_secs:.1f}s")
 
         return len(vectors)
 
@@ -129,10 +128,7 @@ class KnowledgeEngine:
         )
         
         # 2. Setup Embedder (Gemini)
-        embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
+        embed_model = self.embed_model
 
         # 3. Create Index and Retriever
         index = VectorStoreIndex.from_vector_store(
@@ -167,10 +163,7 @@ class KnowledgeEngine:
             namespace=notebook_id
         )
         
-        embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
+        embed_model = self.embed_model
 
         # 2. Setup Reasoning Engine (Gemini 3 Flash via google-genai)
         llm = GoogleGenAI(
@@ -221,10 +214,7 @@ class KnowledgeEngine:
             pinecone_index=self.vector_service.index,
             namespace=notebook_id
         )
-        embed_model = GeminiEmbedding(
-            model_name="models/gemini-embedding-001",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
+        embed_model = self.embed_model
         llm = GoogleGenAI(
             model="gemini-3-flash-preview",
             api_key=os.getenv("GEMINI_API_KEY")
