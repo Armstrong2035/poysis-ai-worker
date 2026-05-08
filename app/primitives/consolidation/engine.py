@@ -61,7 +61,7 @@ class ConsolidationEngine:
 
             if len(batch) >= BATCH_SIZE:
                 documents = self._to_documents(batch, offset=total_chunks - len(batch))
-                indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, chunk=False)
+                indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, )
                 total_vectors += indexed
                 batch_number += 1
                 print(f"[ConsolidationEngine] Batch {batch_number} — {indexed} vectors indexed")
@@ -78,7 +78,7 @@ class ConsolidationEngine:
         # Embed any remaining chunks
         if batch:
             documents = self._to_documents(batch, offset=total_chunks - len(batch))
-            indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, chunk=False)
+            indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, )
             total_vectors += indexed
             print(f"[ConsolidationEngine] Final batch — {indexed} vectors indexed")
             await self._flush_completed_files(scope.workspace_id, runner)

@@ -49,28 +49,20 @@ class KnowledgeEngine:
 
         return await self._run_ingestion_pipeline(notebook_id, llama_docs)
 
-    async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document], chunk: bool = True) -> int:
+    async def _run_ingestion_pipeline(self, notebook_id: str, documents: List[Document]) -> int:
         """
         Core ingestion pipeline using LlamaIndex for embedding, then upserts via
         VectorService directly to Supabase pgvector.
-        Set chunk=False for pre-segmented documents (e.g. spreadsheet rows).
         """
         import asyncio
         import time
 
-        # 1. Create Pipeline — embed only
-        transformations = []
-        if chunk:
-            transformations.append(SentenceSplitter(chunk_size=512, chunk_overlap=50))
-        transformations.append(self.embed_model)
-
-        pipeline = IngestionPipeline(transformations=transformations)
-
-        # Truncate oversized docs before embedding — OpenAI limit is 8192 tokens (~32k chars)
-        _MAX_CHARS = 30000
-        for doc in documents:
-            if len(doc.text) > _MAX_CHARS:
-                doc.text = doc.text[:_MAX_CHARS]
+        # Always chunk — SentenceSplitter keeps short docs/rows intact and safely
+        # splits anything that would exceed OpenAI's 8192-token per-input limit.
+        pipeline = IngestionPipeline(transformations=[
+            SentenceSplitter(chunk_size=512, chunk_overlap=50),
+            self.embed_model,
+        ])
 
         # 3. Embed (Async) — timed, with retry on 429
         doc_count = len(documents)
@@ -280,7 +272,7 @@ class KnowledgeEngine:
                     for row in rows if row.get("text")
                 ]
                 # Each row is already a discrete unit — skip chunking
-                return await self._run_ingestion_pipeline(notebook_id, documents, chunk=False)
+                return await self._run_ingestion_pipeline(notebook_id, documents)
 
             # All other formats: LlamaIndex readers
             else:
