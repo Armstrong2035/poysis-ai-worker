@@ -44,8 +44,7 @@ class VectorService:
                             """
                             INSERT INTO vectors (id, namespace, embedding, metadata)
                             VALUES %s
-                            ON CONFLICT (id) DO UPDATE SET
-                                namespace = EXCLUDED.namespace,
+                            ON CONFLICT (id, namespace) DO UPDATE SET
                                 embedding = EXCLUDED.embedding,
                                 metadata = EXCLUDED.metadata
                             """,
