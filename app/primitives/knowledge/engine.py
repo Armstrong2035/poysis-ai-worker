@@ -66,9 +66,15 @@ class KnowledgeEngine:
 
         pipeline = IngestionPipeline(transformations=transformations)
 
+        # Truncate oversized docs before embedding — OpenAI limit is 8192 tokens (~32k chars)
+        _MAX_CHARS = 30000
+        for doc in documents:
+            if len(doc.text) > _MAX_CHARS:
+                doc.text = doc.text[:_MAX_CHARS]
+
         # 3. Embed (Async) — timed, with retry on 429
         doc_count = len(documents)
-        print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → Gemini embedding-001 | namespace='{notebook_id}'")
+        print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → text-embedding-3-small | namespace='{notebook_id}'")
         t0 = time.perf_counter()
         max_retries = 5
         for attempt in range(max_retries):
@@ -87,6 +93,12 @@ class KnowledgeEngine:
         chunks = len(embedded_nodes)
         rate = chunks / embed_secs if embed_secs > 0 else 0
         print(f"[STEP 3 EMBED ] done — {chunks} vectors | {embed_secs:.1f}s | {rate:.1f} chunks/s")
+
+        # Truncate any nodes whose text exceeds OpenAI's 8192-token limit (~32k chars)
+        _MAX_CHARS = 30000
+        for node in embedded_nodes:
+            if len(node.get_content()) > _MAX_CHARS:
+                node.text = node.get_content()[:_MAX_CHARS]
 
         # 4. Upsert via VectorService — include _text so retrieval doesn't need a separate store
         vectors = [
