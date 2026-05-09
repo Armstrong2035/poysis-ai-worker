@@ -192,6 +192,45 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to mark files indexed: {e}")
 
+    async def save_topics(self, workspace_id: str, topics: list) -> None:
+        """Upsert topic summaries for a workspace."""
+        if not self.client or not topics:
+            return
+        try:
+            rows = [
+                {
+                    "workspace_id": workspace_id,
+                    "topic_id": t["topic_id"],
+                    "label": t.get("label"),
+                    "keywords": t.get("keywords", []),
+                    "doc_count": t.get("doc_count", 0),
+                    "updated_at": "now()",
+                }
+                for t in topics
+            ]
+            self.client.table("consolidation_topics").upsert(
+                rows, on_conflict="workspace_id,topic_id"
+            ).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save topics: {e}")
+
+    async def get_topics(self, workspace_id: str) -> list:
+        """Fetch all topics for a workspace."""
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("consolidation_topics")
+                .select("topic_id, label, keywords, doc_count, updated_at")
+                .eq("workspace_id", workspace_id)
+                .order("doc_count", desc=True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch topics: {e}")
+            return []
+
     async def get_raw_logs(self, workspace_id: str, start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100, offset: int = 0) -> list:
         """
         Fetch raw, paginated search logs for a workspace, joining any associated attribution events.

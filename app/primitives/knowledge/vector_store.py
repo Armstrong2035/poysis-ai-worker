@@ -117,6 +117,51 @@ class VectorService:
         print(f"[VECTOR] Score gap cut: keeping {cut}/{len(matches)} candidates")
         return matches[:cut]
 
+    def fetch_all_vectors(self, namespace: str) -> List[Dict[str, Any]]:
+        """Fetch all vectors with embeddings for a namespace (used for clustering)."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, embedding::text, metadata FROM vectors WHERE namespace = %s",
+                    [namespace]
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        results = []
+        for row_id, emb_text, metadata in rows:
+            try:
+                embedding = json.loads(emb_text)
+            except Exception:
+                continue
+            results.append({"id": row_id, "embedding": embedding, "metadata": metadata or {}})
+        return results
+
+    def update_vector_metadata_batch(self, updates: List[Dict[str, Any]], namespace: str) -> None:
+        """Merge topic metadata into existing vector metadata records."""
+        if not updates:
+            return
+        conn = self._get_conn()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    from psycopg2.extras import execute_values
+                    execute_values(
+                        cur,
+                        """
+                        UPDATE vectors AS v
+                        SET metadata = v.metadata || u.new_meta::jsonb
+                        FROM (VALUES %s) AS u(vid, ns, new_meta)
+                        WHERE v.id = u.vid AND v.namespace = u.ns
+                        """,
+                        [(u["id"], namespace, json.dumps(u["metadata"])) for u in updates],
+                        template="(%s, %s, %s)"
+                    )
+        finally:
+            conn.close()
+
     def delete_all(self, namespace: Optional[str] = None):
         conn = self._get_conn()
         try:

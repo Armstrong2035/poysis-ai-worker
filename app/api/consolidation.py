@@ -6,12 +6,14 @@ import asyncio
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
 from app.primitives.consolidation.engine import ConsolidationEngine
+from app.primitives.consolidation.clustering import ClusteringEngine
 from app.primitives.database import DatabaseService
 from app.primitives.consolidation.google_auth import get_valid_token
 
 router = APIRouter(prefix="/consolidation", tags=["consolidation"])
 db = DatabaseService()
 engine = ConsolidationEngine(db=db)
+clustering_engine = ClusteringEngine(db=db)
 
 # In-memory job tracker — resets on redeploy, sufficient for now
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -69,6 +71,17 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
             })
 
         _jobs[workspace_id] = {
+            "status": "clustering",
+            "vectors_indexed": total_vectors,
+            "docs_processed": total_docs,
+            "docs_skipped": total_skipped,
+            "docs_orphaned": total_orphaned,
+            "errors": all_errors,
+            "iterations": iteration,
+        }
+
+        cluster_result = await clustering_engine.run_clustering(workspace_id)
+        _jobs[workspace_id] = {
             "status": "done",
             "vectors_indexed": total_vectors,
             "docs_processed": total_docs,
@@ -76,6 +89,8 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
             "docs_orphaned": total_orphaned,
             "errors": all_errors,
             "iterations": iteration,
+            "topics_found": cluster_result.get("topics_found", 0),
+            "clustering": cluster_result.get("status"),
         }
     except Exception as e:
         _jobs[workspace_id] = {"status": "failed", "error": str(e)}
@@ -140,3 +155,37 @@ async def snapshot_status(workspace_id: str):
     if not job:
         return {"status": "not_started", "workspace_id": workspace_id}
     return {"workspace_id": workspace_id, **job}
+
+
+_cluster_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+@router.post("/cluster/{workspace_id}")
+async def run_clustering(workspace_id: str, background_tasks: BackgroundTasks):
+    if _cluster_jobs.get(workspace_id, {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="Clustering already running for this workspace.")
+
+    async def _do_cluster():
+        _cluster_jobs[workspace_id] = {"status": "running"}
+        try:
+            result = await clustering_engine.run_clustering(workspace_id)
+            _cluster_jobs[workspace_id] = result
+        except Exception as e:
+            _cluster_jobs[workspace_id] = {"status": "failed", "error": str(e)}
+
+    background_tasks.add_task(_do_cluster)
+    return {"status": "started", "workspace_id": workspace_id}
+
+
+@router.get("/cluster/status/{workspace_id}")
+async def cluster_status(workspace_id: str):
+    job = _cluster_jobs.get(workspace_id)
+    if not job:
+        return {"status": "not_started", "workspace_id": workspace_id}
+    return {"workspace_id": workspace_id, **job}
+
+
+@router.get("/topics/{workspace_id}")
+async def get_topics(workspace_id: str):
+    topics = await db.get_topics(workspace_id)
+    return {"workspace_id": workspace_id, "topics": topics}
