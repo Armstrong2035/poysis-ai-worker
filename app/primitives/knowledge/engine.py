@@ -68,7 +68,7 @@ class KnowledgeEngine:
         print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → text-embedding-3-small | namespace='{notebook_id}'")
         t0 = time.perf_counter()
         # Sub-batch to stay under OpenAI's 40k TPM limit (~512 tokens/chunk × 50 = 25k max)
-        SUB_BATCH = 50
+        SUB_BATCH = 200
         embeddings = []
         for i in range(0, len(texts), SUB_BATCH):
             sub = texts[i:i + SUB_BATCH]
@@ -108,7 +108,7 @@ class KnowledgeEngine:
         if vectors:
             print(f"[STEP 4 UPSERT] {len(vectors)} vectors → Supabase pgvector | namespace='{notebook_id}'")
             t1 = time.perf_counter()
-            await asyncio.to_thread(self.vector_service.upsert_vectors, vectors, notebook_id)
+            await self.vector_service.upsert_vectors(vectors, notebook_id)
             upsert_secs = time.perf_counter() - t1
             print(f"[STEP 4 UPSERT] done — {upsert_secs:.1f}s")
 

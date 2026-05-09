@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import psycopg2
 from psycopg2.extras import execute_values
 from typing import List, Dict, Any, Optional
@@ -16,44 +17,47 @@ class VectorService:
     def _get_conn(self):
         return psycopg2.connect(self.conn_str)
 
-    def upsert_vectors(self, vectors: List[Dict[str, Any]], namespace: str, batch_size: int = 100):
-        total = len(vectors)
-        print(f"[VECTOR] Upserting {total} vectors to namespace '{namespace}'...")
-
+    def _insert_batch(self, rows: list, batch_num: int, total_batches: int):
         conn = self._get_conn()
         try:
             with conn:
                 with conn.cursor() as cur:
-                    for i in range(0, total, batch_size):
-                        batch = vectors[i:i + batch_size]
-                        batch_num = (i // batch_size) + 1
-                        total_batches = (total + batch_size - 1) // batch_size
-
-                        rows = [
-                            (
-                                v["id"],
-                                namespace,
-                                "[" + ",".join(str(x) for x in v["values"]) + "]",
-                                json.dumps(v.get("metadata", {})),
-                            )
-                            for v in batch
-                        ]
-
-                        execute_values(
-                            cur,
-                            """
-                            INSERT INTO vectors (id, namespace, embedding, metadata)
-                            VALUES %s
-                            ON CONFLICT (id, namespace) DO UPDATE SET
-                                embedding = EXCLUDED.embedding,
-                                metadata = EXCLUDED.metadata
-                            """,
-                            rows,
-                            template="(%s, %s, %s::vector, %s::jsonb)"
-                        )
-                        print(f"[VECTOR]   -> Batch {batch_num}/{total_batches} OK")
+                    execute_values(
+                        cur,
+                        """
+                        INSERT INTO vectors (id, namespace, embedding, metadata)
+                        VALUES %s
+                        ON CONFLICT (id, namespace) DO UPDATE SET
+                            embedding = EXCLUDED.embedding,
+                            metadata = EXCLUDED.metadata
+                        """,
+                        rows,
+                        template="(%s, %s, %s::vector, %s::jsonb)"
+                    )
+            print(f"[VECTOR]   -> Batch {batch_num}/{total_batches} OK")
         finally:
             conn.close()
+
+    async def upsert_vectors(self, vectors: List[Dict[str, Any]], namespace: str, batch_size: int = 100):
+        total = len(vectors)
+        print(f"[VECTOR] Upserting {total} vectors to namespace '{namespace}'...")
+
+        batches = [vectors[i:i + batch_size] for i in range(0, total, batch_size)]
+        total_batches = len(batches)
+
+        async def insert(batch, idx):
+            rows = [
+                (
+                    v["id"],
+                    namespace,
+                    "[" + ",".join(str(x) for x in v["values"]) + "]",
+                    json.dumps(v.get("metadata", {})),
+                )
+                for v in batch
+            ]
+            await asyncio.to_thread(self._insert_batch, rows, idx + 1, total_batches)
+
+        await asyncio.gather(*[insert(b, i) for i, b in enumerate(batches)])
 
     def query_vectors(
         self,
