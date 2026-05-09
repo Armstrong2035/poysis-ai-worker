@@ -142,7 +142,7 @@ class BertopicHandler:
 
     def _build_model(self):
         from bertopic import BERTopic
-        from bertopic.representation import KeyBERTInspired, MaximalMarginalRelevance
+        from bertopic.representation import MaximalMarginalRelevance
         from hdbscan import HDBSCAN
         from sklearn.feature_extraction.text import CountVectorizer
         from umap import UMAP
@@ -166,10 +166,7 @@ class BertopicHandler:
             min_df=2,
             ngram_range=(1, 2),
         )
-        representation_model = {
-            "KeyBERT": KeyBERTInspired(),
-            "MMR": MaximalMarginalRelevance(diversity=0.35),
-        }
+        representation_model = MaximalMarginalRelevance(diversity=0.35)
 
         return BERTopic(
             embedding_model=None,
