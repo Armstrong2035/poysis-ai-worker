@@ -80,10 +80,29 @@ class SnapshotRunner:
 
         if "google_drive" in self.scope.sources:
             connector = GoogleDriveConnector(access_token=self.scope.google_access_token or "")
+            import time
             items_seen = 0
-            pending = []
+            sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+            queue: asyncio.Queue = asyncio.Queue()
+            tasks = []
 
-            # Phase 1: list items and apply skip/orphan logic (fast, stays sequential)
+            async def fetch_and_parse(item: RawSourceItem):
+                async with sem:
+                    try:
+                        size_kb = item.size_bytes / 1024
+                        print(f"[STEP 1 FETCH ] '{item.title}' | {size_kb:.1f}KB | type={item.content_type}")
+                        t0 = time.perf_counter()
+                        chunks = await self._process_item(item, connector)
+                        elapsed = time.perf_counter() - t0
+                        print(f"[STEP 2 PARSE ] '{item.title}' | {len(chunks)} chunks | {elapsed:.2f}s")
+                        if len(chunks) > MAX_CHUNKS_PER_DOC:
+                            print(f"[STEP 2 PARSE ] WARNING: {len(chunks)} chunks — large document, indexing in full")
+                        await queue.put((item, chunks, None))
+                    except Exception as e:
+                        print(f"[STEP 1 FETCH ] FAILED '{item.title}' | {e}")
+                        await queue.put((item, None, e))
+
+            # List items and kick off fetch tasks immediately as each item arrives
             async for item in connector.list_items(self.scope):
                 items_seen += 1
                 indexed_etag = self.scope.indexed_files.get(item.source_id)
@@ -103,38 +122,15 @@ class SnapshotRunner:
                     self.docs_orphaned += 1
                     continue
 
-                pending.append(item)
+                tasks.append(asyncio.create_task(fetch_and_parse(item)))
 
             if self.scope.doc_limit > 0 and items_seen >= self.scope.doc_limit:
                 self.has_more = True
 
-            if not pending:
+            if not tasks:
                 return
 
-            # Phase 2: fetch + parse concurrently, yield chunks as each doc finishes
-            import time
-            sem = asyncio.Semaphore(FETCH_CONCURRENCY)
-            queue: asyncio.Queue = asyncio.Queue()
-
-            async def fetch_and_parse(item: RawSourceItem):
-                async with sem:
-                    try:
-                        size_kb = item.size_bytes / 1024
-                        print(f"[STEP 1 FETCH ] '{item.title}' | {size_kb:.1f}KB | type={item.content_type}")
-                        t0 = time.perf_counter()
-                        chunks = await self._process_item(item, connector)
-                        elapsed = time.perf_counter() - t0
-                        print(f"[STEP 2 PARSE ] '{item.title}' | {len(chunks)} chunks | {elapsed:.2f}s")
-                        if len(chunks) > MAX_CHUNKS_PER_DOC:
-                            print(f"[STEP 2 PARSE ] WARNING: {len(chunks)} chunks — large document, indexing in full")
-                        await queue.put((item, chunks, None))
-                    except Exception as e:
-                        print(f"[STEP 1 FETCH ] FAILED '{item.title}' | {e}")
-                        await queue.put((item, None, e))
-
-            tasks = [asyncio.create_task(fetch_and_parse(item)) for item in pending]
-
-            for _ in range(len(pending)):
+            for _ in range(len(tasks)):
                 item, chunks, error = await queue.get()
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
