@@ -204,6 +204,7 @@ class DatabaseService:
                     "label": t.get("label"),
                     "keywords": t.get("keywords", []),
                     "doc_count": t.get("doc_count", 0),
+                    "parent_topic_id": t.get("parent_topic_id"),
                     "updated_at": "now()",
                 }
                 for t in topics

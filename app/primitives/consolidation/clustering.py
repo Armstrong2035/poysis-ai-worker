@@ -49,7 +49,13 @@ class ClusteringEngine:
         print(f"[Clustering] Updating metadata for {len(updates)} vectors...")
         await asyncio.to_thread(self.vector_service.update_vector_metadata_batch, updates, namespace)
 
-        # Build topic summary rows
+        # Compute hierarchy — cut tree to ~20 parent groups
+        print(f"[Clustering] Computing topic hierarchy...")
+        leaf_to_parent, parent_labels, parent_keywords = await asyncio.to_thread(
+            handler.compute_hierarchy, texts, topics, 20
+        )
+
+        # Build leaf topic rows
         topic_info = handler.get_topic_info()
         topics_data = []
         for _, row in topic_info.iterrows():
@@ -59,20 +65,40 @@ class ClusteringEngine:
                 "label": handler.get_topic_label(t_id),
                 "keywords": handler.get_topic_keywords(t_id),
                 "doc_count": int(row["Count"]),
+                "parent_topic_id": leaf_to_parent.get(t_id),
             })
+
+        # Build parent topic rows (one per unique parent)
+        seen_parents = set()
+        for t in topics_data:
+            pid = t.get("parent_topic_id")
+            if pid is not None and pid not in seen_parents:
+                seen_parents.add(pid)
+                topics_data.append({
+                    "topic_id": pid,
+                    "label": parent_labels.get(pid, f"Topic {pid}"),
+                    "keywords": parent_keywords.get(pid, []),
+                    "doc_count": sum(
+                        t2["doc_count"] for t2 in topics_data
+                        if t2.get("parent_topic_id") == pid
+                    ),
+                    "parent_topic_id": None,
+                })
 
         if self.db:
             await self.db.save_topics(workspace_id, topics_data)
 
         topic_count = len([t for t in set(topics) if t != -1])
         outlier_count = topics.count(-1)
+        parent_count = len(seen_parents)
 
-        print(f"[Clustering] Done — {topic_count} topics, {outlier_count} outliers")
+        print(f"[Clustering] Done — {topic_count} leaf topics, {parent_count} parent topics, {outlier_count} outliers")
         return {
             "status": "done",
             "workspace_id": workspace_id,
             "vectors_clustered": len(vectors),
             "topics_found": topic_count,
+            "parent_topics": parent_count,
             "outliers": outlier_count,
-            "topics": topics_data,
+            "topics": [t for t in topics_data if t.get("parent_topic_id") is None and t["topic_id"] >= 0],
         }

@@ -125,6 +125,81 @@ class BertopicHandler:
             return []
         return self.topic_model.get_topic_info()
 
+    def compute_hierarchy(
+        self,
+        documents: Sequence[str],
+        topics: Sequence[int],
+        nr_parents: int = 20,
+    ) -> Tuple[Dict[int, int], Dict[int, str], Dict[int, List[str]]]:
+        """
+        Cut the BERTopic merge tree to produce ~nr_parents groups.
+        Returns:
+          leaf_to_parent  — {leaf_topic_id: parent_topic_id}
+          parent_labels   — {parent_topic_id: label_string}
+          parent_keywords — {parent_topic_id: [keyword, ...]}
+        """
+        if not self.has_model or not self.topic_model:
+            return {}, {}, {}
+
+        leaf_ids = sorted(set(int(t) for t in topics if t != -1))
+        n_leaves = len(leaf_ids)
+
+        if n_leaves <= nr_parents:
+            return {t: t for t in leaf_ids}, {}, {}
+
+        hier = self.topic_model.hierarchical_topics(list(documents))
+
+        # Union-Find — works on both leaf IDs and intermediate node IDs
+        uf: Dict[int, int] = {t: t for t in leaf_ids}
+
+        def find(x: int) -> int:
+            while uf.get(x, x) != x:
+                uf[x] = uf.get(uf[x], uf[x])
+                x = uf[x]
+            return x
+
+        def union(a: int, b: int, new_id: int):
+            uf[new_id] = new_id
+            uf[find(a)] = new_id
+            uf[find(b)] = new_id
+
+        n_merges = n_leaves - nr_parents
+        done = 0
+        parent_names: Dict[int, str] = {}
+
+        for _, row in hier.iterrows():
+            if done >= n_merges:
+                break
+            left = int(row["Child_Left_ID"])
+            right = int(row["Child_Right_ID"])
+            pid = int(row["Parent_ID"])
+            union(left, right, pid)
+            parent_names[pid] = str(row.get("Parent_Name", f"Topic {pid}"))
+            done += 1
+
+        leaf_to_parent = {t: find(t) for t in leaf_ids}
+
+        # Build parent labels and keywords from the leaves under each parent
+        from collections import defaultdict
+        parent_leaves: Dict[int, List[int]] = defaultdict(list)
+        for leaf, parent in leaf_to_parent.items():
+            parent_leaves[parent].append(leaf)
+
+        parent_labels: Dict[int, str] = {}
+        parent_keywords: Dict[int, List[str]] = {}
+        for pid, leaves in parent_leaves.items():
+            all_kw: List[str] = []
+            for leaf in leaves:
+                all_kw.extend(self.get_topic_keywords(leaf, limit=3))
+            seen: List[str] = []
+            for kw in all_kw:
+                if kw not in seen:
+                    seen.append(kw)
+            parent_keywords[pid] = seen[:8]
+            parent_labels[pid] = parent_names.get(pid, " ".join(seen[:4]))
+
+        return leaf_to_parent, parent_labels, parent_keywords
+
     def get_topic_label(self, topic_id: int) -> str:
         if topic_id == OUTLIER_TOPIC_ID or not self.topic_model or not self.has_model:
             return OUTLIER_TOPIC_LABEL
