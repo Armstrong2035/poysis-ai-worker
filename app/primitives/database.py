@@ -192,6 +192,15 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to mark files indexed: {e}")
 
+    async def clear_topics(self, workspace_id: str) -> None:
+        """Delete all topics for a workspace before re-saving."""
+        if not self.client:
+            return
+        try:
+            self.client.table("consolidation_topics").delete().eq("workspace_id", workspace_id).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to clear topics: {e}")
+
     async def save_topics(self, workspace_id: str, topics: list) -> None:
         """Upsert topic summaries for a workspace."""
         if not self.client or not topics:
@@ -222,7 +231,7 @@ class DatabaseService:
         try:
             res = (
                 self.client.table("consolidation_topics")
-                .select("topic_id, label, keywords, doc_count, updated_at")
+                .select("topic_id, label, keywords, doc_count, parent_topic_id, updated_at")
                 .eq("workspace_id", workspace_id)
                 .order("doc_count", desc=True)
                 .execute()

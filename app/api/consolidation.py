@@ -89,7 +89,9 @@ async def _run_snapshot_job(workspace_id: str, scope: ScopeConfig):
             "docs_orphaned": total_orphaned,
             "errors": all_errors,
             "iterations": iteration,
-            "topics_found": cluster_result.get("topics_found", 0),
+            "leaf_topics": cluster_result.get("leaf_topics", 0),
+            "total_topics": cluster_result.get("total_topics", 0),
+            "hierarchy_depth": cluster_result.get("hierarchy_depth", 0),
             "clustering": cluster_result.get("status"),
         }
     except Exception as e:

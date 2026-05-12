@@ -20,6 +20,7 @@ models/
 *.json
 !app/
 !requirements.txt
+output.txt
 
 # OS
 .DS_Store
@@ -30,3 +31,4 @@ Thumbs.db
 .idea/
 .gemini/
 .agent/
+.mcp.json

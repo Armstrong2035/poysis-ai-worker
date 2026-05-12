@@ -122,6 +122,7 @@ class VectorService:
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = '0'")
                 cur.execute(
                     "SELECT id, embedding::text, metadata FROM vectors WHERE namespace = %s",
                     [namespace]
@@ -137,6 +138,89 @@ class VectorService:
             except Exception:
                 continue
             results.append({"id": row_id, "embedding": embedding, "metadata": metadata or {}})
+        return results
+
+    def fetch_vector_source_ids(self, namespace: str) -> List[Dict[str, Any]]:
+        """Lightweight fetch: vector id + source_id only, no embeddings."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, metadata->>'source_id' FROM vectors WHERE namespace = %s",
+                    [namespace],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [{"id": r[0], "source_id": r[1]} for r in rows]
+
+    def list_documents(self, namespace: str) -> List[Dict[str, Any]]:
+        """Return one row per distinct source_id with title, url, and chunk count."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        metadata->>'source_id'  AS source_id,
+                        metadata->>'title'      AS title,
+                        metadata->>'url'        AS url,
+                        metadata->>'source_type' AS source_type,
+                        COUNT(*)                AS chunk_count
+                    FROM vectors
+                    WHERE namespace = %s
+                    GROUP BY 1, 2, 3, 4
+                    ORDER BY title
+                    """,
+                    [namespace],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            {"source_id": r[0], "title": r[1], "url": r[2], "source_type": r[3], "chunks": r[4]}
+            for r in rows
+        ]
+
+    def list_documents_with_snippets(self, namespace: str, snippet_words: int = 150) -> List[Dict[str, Any]]:
+        """One row per document: title + first 3 chunks concatenated for richer context."""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        metadata->>'source_id'                          AS source_id,
+                        MAX(metadata->>'title')                         AS title,
+                        MAX(metadata->>'url')                           AS url,
+                        string_agg(metadata->>'_text', ' ' ORDER BY id) AS combined_text
+                    FROM (
+                        SELECT *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY metadata->>'source_id' ORDER BY id
+                            ) AS rn
+                        FROM vectors
+                        WHERE namespace = %s
+                    ) sub
+                    WHERE rn <= 3
+                    GROUP BY metadata->>'source_id'
+                    """,
+                    [namespace],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        results = []
+        for source_id, title, url, combined_text in rows:
+            words = (combined_text or "").split()
+            snippet = " ".join(words[:snippet_words])
+            results.append({
+                "source_id": source_id,
+                "title": (title or "").strip(),
+                "url": url or "",
+                "snippet": snippet,
+            })
         return results
 
     def update_vector_metadata_batch(self, updates: List[Dict[str, Any]], namespace: str) -> None:
