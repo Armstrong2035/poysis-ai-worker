@@ -10,6 +10,7 @@ from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.consolidation import router as consolidation_router
 from app.api.mcp_http import router as mcp_router
+from app.ouroboros.promise_detector import router as ouroboros_router
 from app.api.waitlist import router as waitlist_router
 from app.middleware import LoggingMiddleware, RateLimitMiddleware, InputValidationMiddleware, ErrorHandlingMiddleware
 from dotenv import load_dotenv
@@ -55,6 +56,8 @@ app.include_router(auth_router)
 app.include_router(consolidation_router)
 # MCP (Claude Cloud Connectors)
 app.include_router(mcp_router)
+# Ouroboros (Build Suggestions)
+app.include_router(ouroboros_router)
 # Waitlist
 app.include_router(waitlist_router)
 

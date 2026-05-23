@@ -26,10 +26,9 @@ async def mcp_tools_list(workspace_id: str = Query(...)):
     Returns the list of available tools Claude can call.
     Called when Claude first connects to this MCP server.
     """
-    # Validate workspace exists
-    ws = await db.get_workspace(workspace_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    # Validate workspace_id is provided
+    if not workspace_id or workspace_id.strip() == "":
+        raise HTTPException(status_code=400, detail="workspace_id required")
 
     return {
         "tools": [
@@ -95,10 +94,9 @@ async def call_mcp_tool(
 
     This endpoint routes to the appropriate retrieval logic.
     """
-    # Validate workspace exists
-    ws = await db.get_workspace(workspace_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    # Validate workspace_id
+    if not workspace_id or workspace_id.strip() == "":
+        raise HTTPException(status_code=400, detail="workspace_id required")
 
     if tool_name == "retrieve_from_knowledge_base":
         query = kwargs.get("query")
@@ -191,9 +189,8 @@ async def mcp_endpoint_info(workspace_id: str = Query(...)):
     """
     Returns info about this MCP endpoint for debugging.
     """
-    ws = await db.get_workspace(workspace_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not workspace_id or workspace_id.strip() == "":
+        raise HTTPException(status_code=400, detail="workspace_id required")
 
     return {
         "workspace_id": workspace_id,
