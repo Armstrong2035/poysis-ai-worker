@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 httpx
-pydantic
+pydantic[email]
 google-generativeai
 python-dotenv
 supabase
@@ -23,3 +23,4 @@ umap-learn
 hdbscan
 scikit-learn
 numpy
+mcp

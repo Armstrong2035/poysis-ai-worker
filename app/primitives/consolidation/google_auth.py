@@ -69,12 +69,12 @@ async def refresh_access_token(refresh_token: str) -> dict:
     }
 
 
-async def get_valid_token(workspace_id: str, db) -> Optional[str]:
+async def get_valid_token(workspace_id: str, db, user_id: str = None) -> Optional[str]:
     """
-    Returns a valid access token for a workspace.
+    Returns a valid access token for a workspace and user.
     Automatically refreshes if expired.
     """
-    tokens = await db.get_google_tokens(workspace_id)
+    tokens = await db.get_google_tokens(workspace_id, user_id)
     if not tokens:
         return None
 
@@ -85,6 +85,7 @@ async def get_valid_token(workspace_id: str, db) -> Optional[str]:
         refreshed = await refresh_access_token(tokens["google_refresh_token"])
         await db.save_google_tokens(
             workspace_id=workspace_id,
+            user_id=user_id,
             access_token=refreshed["access_token"],
             refresh_token=tokens["google_refresh_token"],
             expiry=refreshed["expiry"],

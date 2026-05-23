@@ -125,78 +125,90 @@ class BertopicHandler:
             return []
         return self.topic_model.get_topic_info()
 
-    def compute_hierarchy(
+    def compute_parent_topics(
         self,
-        documents: Sequence[str],
-        topics: Sequence[int],
-        nr_parents: int = 20,
-    ) -> Tuple[Dict[int, int], Dict[int, str], Dict[int, List[str]]]:
+        leaf_ids: List[int],
+        phrases: List[str],
+        phrase_embeddings: Sequence[Sequence[float]],
+        nr_parents: int,
+    ) -> Tuple[Dict[int, Optional[int]], Dict[int, str], Dict[int, List[str]]]:
         """
-        Cut the BERTopic merge tree to produce ~nr_parents groups.
+        Second-pass BERTopic: each leaf topic becomes a document (its keyword phrase)
+        with a pre-computed embedding. BERTopic clusters those ~N leaf vectors into
+        nr_parents groups. Parent IDs are offset by max(leaf_ids)+1 to avoid collision.
+
         Returns:
           leaf_to_parent  — {leaf_topic_id: parent_topic_id}
           parent_labels   — {parent_topic_id: label_string}
           parent_keywords — {parent_topic_id: [keyword, ...]}
         """
-        if not self.has_model or not self.topic_model:
-            return {}, {}, {}
-
-        leaf_ids = sorted(set(int(t) for t in topics if t != -1))
         n_leaves = len(leaf_ids)
-
         if n_leaves <= nr_parents:
             return {t: t for t in leaf_ids}, {}, {}
 
-        hier = self.topic_model.hierarchical_topics(list(documents))
+        import numpy as np
+        from bertopic import BERTopic
+        from bertopic.representation import MaximalMarginalRelevance
+        from hdbscan import HDBSCAN
+        from sklearn.feature_extraction.text import CountVectorizer
+        from umap import UMAP
 
-        # Union-Find — works on both leaf IDs and intermediate node IDs
-        uf: Dict[int, int] = {t: t for t in leaf_ids}
+        n_neighbors = min(15, max(2, n_leaves // 10))
+        n_components = min(5, n_leaves - 2)
 
-        def find(x: int) -> int:
-            while uf.get(x, x) != x:
-                uf[x] = uf.get(uf[x], uf[x])
-                x = uf[x]
-            return x
+        umap_model = UMAP(
+            n_neighbors=n_neighbors,
+            n_components=n_components,
+            min_dist=0.0,
+            metric="cosine",
+            random_state=42,
+        )
+        hdbscan_model = HDBSCAN(
+            min_cluster_size=2,
+            min_samples=1,
+            metric="euclidean",
+            cluster_selection_method="eom",
+            prediction_data=True,
+        )
+        vectorizer_model = CountVectorizer(
+            stop_words="english",
+            min_df=1,
+            ngram_range=(1, 2),
+        )
+        representation_model = MaximalMarginalRelevance(diversity=0.35)
 
-        def union(a: int, b: int, new_id: int):
-            uf[new_id] = new_id
-            uf[find(a)] = new_id
-            uf[find(b)] = new_id
+        second_model = BERTopic(
+            embedding_model=None,
+            umap_model=umap_model,
+            hdbscan_model=hdbscan_model,
+            vectorizer_model=vectorizer_model,
+            representation_model=representation_model,
+            nr_topics=nr_parents,
+            calculate_probabilities=False,
+            verbose=False,
+        )
 
-        n_merges = n_leaves - nr_parents
-        done = 0
-        parent_names: Dict[int, str] = {}
+        parent_assignments, _ = second_model.fit_transform(
+            phrases,
+            embeddings=np.asarray(phrase_embeddings, dtype="float32"),
+        )
 
-        for _, row in hier.iterrows():
-            if done >= n_merges:
-                break
-            left = int(row["Child_Left_ID"])
-            right = int(row["Child_Right_ID"])
-            pid = int(row["Parent_ID"])
-            union(left, right, pid)
-            parent_names[pid] = str(row.get("Parent_Name", f"Topic {pid}"))
-            done += 1
+        offset = max(leaf_ids) + 1
 
-        leaf_to_parent = {t: find(t) for t in leaf_ids}
-
-        # Build parent labels and keywords from the leaves under each parent
-        from collections import defaultdict
-        parent_leaves: Dict[int, List[int]] = defaultdict(list)
-        for leaf, parent in leaf_to_parent.items():
-            parent_leaves[parent].append(leaf)
+        leaf_to_parent: Dict[int, int] = {}
+        for leaf_id, raw_parent in zip(leaf_ids, parent_assignments):
+            leaf_to_parent[leaf_id] = None if raw_parent == -1 else raw_parent + offset
 
         parent_labels: Dict[int, str] = {}
         parent_keywords: Dict[int, List[str]] = {}
-        for pid, leaves in parent_leaves.items():
-            all_kw: List[str] = []
-            for leaf in leaves:
-                all_kw.extend(self.get_topic_keywords(leaf, limit=3))
-            seen: List[str] = []
-            for kw in all_kw:
-                if kw not in seen:
-                    seen.append(kw)
-            parent_keywords[pid] = seen[:8]
-            parent_labels[pid] = parent_names.get(pid, " ".join(seen[:4]))
+        for raw_id in set(parent_assignments):
+            if raw_id == -1:
+                continue
+            pid = raw_id + offset
+            topic_words = second_model.get_topic(raw_id) or []
+            words = [w for w, _ in topic_words[:5]]
+            parent_labels[pid] = " ".join(words) if words else f"Topic {pid}"
+            parent_keywords[pid] = [w for w, _ in topic_words[:8]]
 
         return leaf_to_parent, parent_labels, parent_keywords
 

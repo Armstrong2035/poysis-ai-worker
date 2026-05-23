@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -6,6 +6,9 @@ import os
 import tempfile
 import shutil
 from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.vector_store import VectorService
+from app.primitives.knowledge.embedder import Embedder
+from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(tags=["retrieval"])
 
@@ -161,4 +164,131 @@ async def ask_question(request: AskRequest):
 
     except Exception as e:
         print(f"[ASK ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Workspace-level Knowledge API (for MCP + external clients)
+# ============================================================================
+
+class QueryKnowledgeRequest(BaseModel):
+    workspace_id: str
+    query: str
+    top_k: Optional[int] = 5
+    min_score: Optional[float] = 0.5
+
+
+@router.post("/query_knowledge_base")
+async def query_knowledge_base(
+    request: QueryKnowledgeRequest,
+    user_id: str = Depends(get_user_id)
+):
+    """
+    Query user's consolidated knowledge base.
+    Returns matching results with sources (title, url, source_type).
+
+    Used by: MCP clients, Claude, ChatGPT, etc.
+    """
+    try:
+        await verify_workspace_ownership(request.workspace_id, user_id)
+
+        embedder = Embedder()
+        vector_service = VectorService()
+
+        # Embed the query
+        query_embedding = await embedder.get_embedding(
+            request.query,
+            task_type="retrieval_query"
+        )
+
+        # Search vectors in the workspace namespace
+        namespace = request.workspace_id
+        raw_results = vector_service.query_vectors(
+            query_embedding=query_embedding,
+            namespace=namespace,
+            top_k=request.top_k * 2,
+        )
+
+        # Filter by min_score
+        filtered = [r for r in raw_results if r.get("score", 0) >= request.min_score]
+        top_results = filtered[:request.top_k]
+
+        # Format results with sources
+        results = []
+        for r in top_results:
+            metadata = r.get("metadata", {})
+            results.append({
+                "id": r["id"],
+                "score": round(r["score"], 4),
+                "text": metadata.get("_text", ""),
+                "source": {
+                    "title": metadata.get("title"),
+                    "url": metadata.get("url"),
+                    "source_type": metadata.get("source_type"),
+                    "source_id": metadata.get("source_id"),
+                }
+            })
+
+        return {
+            "query": request.query,
+            "results": results,
+            "total": len(results),
+            "workspace_id": request.workspace_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[QUERY_KNOWLEDGE ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/list_documents")
+async def list_documents(
+    workspace_id: str,
+    search: Optional[str] = None,
+    source_type: Optional[str] = None,
+    user_id: str = Depends(get_user_id)
+):
+    """
+    Search documents in user's knowledge base by name or source type.
+    Returns document metadata: title, url, source_type, snippet.
+
+    Parameters:
+    - workspace_id: required
+    - search: optional, filter by document title (case-insensitive)
+    - source_type: optional, filter by source (e.g., "google_drive", "notion")
+
+    Used by: MCP clients, Claude, ChatGPT, etc.
+    """
+    try:
+        await verify_workspace_ownership(workspace_id, user_id)
+
+        vector_service = VectorService()
+        all_docs = vector_service.list_documents_with_snippets(
+            namespace=workspace_id,
+            snippet_words=200
+        )
+
+        # Filter by search term (case-insensitive)
+        if search:
+            search_lower = search.lower()
+            all_docs = [d for d in all_docs if search_lower in d.get("title", "").lower()]
+
+        # Filter by source_type
+        if source_type:
+            all_docs = [d for d in all_docs if d.get("source_type") == source_type]
+
+        return {
+            "workspace_id": workspace_id,
+            "search_query": search,
+            "source_filter": source_type,
+            "documents": all_docs,
+            "total": len(all_docs)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[LIST_DOCUMENTS ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))

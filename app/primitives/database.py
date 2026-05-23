@@ -114,6 +114,7 @@ class DatabaseService:
         access_token: str,
         refresh_token: str,
         expiry: str,
+        user_id: str = None,
     ) -> bool:
         """Store or update Google OAuth tokens in consolidation_workspaces."""
         if not self.client:
@@ -121,26 +122,30 @@ class DatabaseService:
         try:
             self.client.table("consolidation_workspaces").upsert({
                 "workspace_id": workspace_id,
+                "user_id": user_id,
                 "google_access_token": access_token,
                 "google_refresh_token": refresh_token,
                 "google_token_expiry": expiry,
-            }, on_conflict="workspace_id").execute()
+            }, on_conflict="consolidation_workspaces_workspace_user_unique").execute()
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to save Google tokens: {e}")
             return False
 
-    async def get_google_tokens(self, workspace_id: str) -> dict | None:
+    async def get_google_tokens(self, workspace_id: str, user_id: str = None) -> dict | None:
         """Retrieve stored Google OAuth tokens from consolidation_workspaces."""
         if not self.client:
             return None
         try:
-            res = (
+            query = (
                 self.client.table("consolidation_workspaces")
                 .select("google_access_token, google_refresh_token, google_token_expiry")
                 .eq("workspace_id", workspace_id)
-                .execute()
             )
+            if user_id:
+                query = query.eq("user_id", user_id)
+
+            res = query.execute()
             return res.data[0] if res.data else None
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to get Google tokens: {e}")
@@ -241,6 +246,19 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to fetch topics: {e}")
             return []
 
+    async def add_waitlist_email(self, email: str, source: Optional[str] = None) -> bool:
+        """Insert a waitlist signup. Idempotent on email (returns True if already present)."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("waitlist").upsert(
+                {"email": email, "source": source}, on_conflict="email"
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to add waitlist email: {e}")
+            return False
+
     async def get_raw_logs(self, workspace_id: str, start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100, offset: int = 0) -> list:
         """
         Fetch raw, paginated search logs for a workspace, joining any associated attribution events.
@@ -250,14 +268,83 @@ class DatabaseService:
         try:
             # We use Supabase relation syntax to join attribution_events
             query = self.client.table("search_logs").select("*, attribution_events(*)").eq("workspace_id", workspace_id)
-            
+
             if start_date:
                 query = query.gte("created_at", start_date)
             if end_date:
                 query = query.lte("created_at", end_date)
-                
+
             res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
             return res.data
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to fetch raw logs for export: {e}")
             return []
+
+    # ============================================================================
+    # Job Tracking (persistent state across deploys)
+    # ============================================================================
+
+    async def create_job(self, workspace_id: str, user_id: str, job_type: str) -> Optional[str]:
+        """Create a new job record. Returns job ID."""
+        if not self.client:
+            return None
+        try:
+            res = self.client.table("consolidation_jobs").insert({
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "job_type": job_type,
+                "status": "running"
+            }).execute()
+            return res.data[0]["id"] if res.data else None
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to create job: {e}")
+            return None
+
+    async def update_job(self, job_id: str, status: str, result: dict = None, error: str = None) -> bool:
+        """Update job status and result/error."""
+        if not self.client:
+            return False
+        try:
+            update_data = {
+                "status": status,
+                "updated_at": "now()"
+            }
+            if status == "done":
+                update_data["completed_at"] = "now()"
+                if result:
+                    update_data["result"] = result
+            if error:
+                update_data["error"] = error
+                if status != "running":
+                    update_data["completed_at"] = "now()"
+
+            self.client.table("consolidation_jobs").update(update_data).eq("id", job_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to update job: {e}")
+            return False
+
+    async def get_job(self, job_id: str) -> Optional[dict]:
+        """Fetch job status."""
+        if not self.client:
+            return None
+        try:
+            res = self.client.table("consolidation_jobs").select("*").eq("id", job_id).execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch job: {e}")
+            return None
+
+    async def get_latest_job(self, workspace_id: str, job_type: str = None) -> Optional[dict]:
+        """Fetch latest job for a workspace (optionally filtered by type)."""
+        if not self.client:
+            return None
+        try:
+            query = self.client.table("consolidation_jobs").select("*").eq("workspace_id", workspace_id)
+            if job_type:
+                query = query.eq("job_type", job_type)
+            res = query.order("created_at", desc=True).limit(1).execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch latest job: {e}")
+            return None

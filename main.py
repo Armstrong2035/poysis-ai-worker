@@ -9,11 +9,20 @@ from app.api.tracking import router as tracking_router
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.consolidation import router as consolidation_router
+from app.api.mcp_http import router as mcp_router
+from app.api.waitlist import router as waitlist_router
+from app.middleware import LoggingMiddleware, RateLimitMiddleware, InputValidationMiddleware, ErrorHandlingMiddleware
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 app = FastAPI(title="Poysis Worker API")
+
+# Order matters: inner middleware (bottom) runs first
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(InputValidationMiddleware)
 
 # Configure CORS
 app.add_middleware(
@@ -44,6 +53,10 @@ app.include_router(analytics_router)
 app.include_router(auth_router)
 # Consolidation
 app.include_router(consolidation_router)
+# MCP (Claude Cloud Connectors)
+app.include_router(mcp_router)
+# Waitlist
+app.include_router(waitlist_router)
 
 if __name__ == "__main__":
     import uvicorn
