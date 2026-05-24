@@ -1,5 +1,5 @@
 """Google Drive and other sources integration."""
-from fastapi import APIRouter, HTTPException, Depends, Form
+from fastapi import APIRouter, HTTPException, Depends, Form, Query
 import os
 from typing import Optional
 
