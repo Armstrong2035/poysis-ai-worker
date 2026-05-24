@@ -1,5 +1,5 @@
 """Google Drive and other sources integration."""
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Form
 import os
 from typing import Optional
 
@@ -47,11 +47,11 @@ async def _count_google_drive_files(access_token: str) -> int:
 
 @router.post("/gdrive/connect")
 async def gdrive_connect(
-    workspace_id: str = Query(...),
-    google_account_email: str = Query(...),
-    access_token: str = Query(...),
-    refresh_token: Optional[str] = Query(None),
-    token_expiry: Optional[str] = Query(None),
+    workspace_id: str = Form(...),
+    google_account_email: str = Form(...),
+    access_token: str = Form(...),
+    refresh_token: Optional[str] = Form(None),
+    token_expiry: Optional[str] = Form(None),
     user_id: str = Depends(get_user_id),
 ):
     """
@@ -128,8 +128,8 @@ async def gdrive_connect(
 
 @router.post("/gdrive/disconnect")
 async def gdrive_disconnect(
-    workspace_id: str = Query(...),
-    google_account_email: str = Query(...),
+    workspace_id: str = Form(...),
+    google_account_email: str = Form(...),
     user_id: str = Depends(get_user_id),
 ):
     """Remove a Google Drive connection for a workspace."""
