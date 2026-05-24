@@ -411,3 +411,94 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to fetch latest job: {e}")
             return None
+
+    # ============================================================================
+    # Google Drive Connections (OAuth + token management)
+    # ============================================================================
+
+    async def get_drive_connection(self, user_id: str, google_account_email: str) -> Optional[Dict[str, Any]]:
+        """Fetch a user's Google Drive connection."""
+        if not self.client:
+            return None
+        try:
+            res = (
+                self.client.table("drive_connections")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("google_account_email", google_account_email)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch drive connection: {e}")
+            return None
+
+    async def list_drive_connections(self, user_id: str) -> list:
+        """List all Google Drive connections for a user."""
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("drive_connections")
+                .select("id, google_account_email, doc_count, last_synced_at, created_at")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to list drive connections: {e}")
+            return []
+
+    async def save_drive_connection(
+        self,
+        user_id: str,
+        google_account_email: str,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+        token_expiry: Optional[str] = None,
+    ) -> bool:
+        """Save or update a Google Drive connection."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("drive_connections").upsert(
+                {
+                    "user_id": user_id,
+                    "google_account_email": google_account_email,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "token_expiry": token_expiry,
+                },
+                on_conflict="user_id,google_account_email",
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save drive connection: {e}")
+            return False
+
+    async def update_drive_connection_doc_count(self, connection_id: str, doc_count: int) -> bool:
+        """Update document count and last synced time for a connection."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("drive_connections").update(
+                {"doc_count": doc_count, "last_synced_at": "now()"}
+            ).eq("id", connection_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to update drive connection doc_count: {e}")
+            return False
+
+    async def delete_drive_connection(self, user_id: str, google_account_email: str) -> bool:
+        """Delete a Google Drive connection."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("drive_connections").delete().eq(
+                "user_id", user_id
+            ).eq("google_account_email", google_account_email).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to delete drive connection: {e}")
+            return False
