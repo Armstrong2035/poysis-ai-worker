@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import asyncio
+import json
 import os
 
 from app.primitives.consolidation.scope import ScopeConfig
@@ -211,6 +213,62 @@ async def snapshot_status(workspace_id: str, user_id: str = Depends(get_user_id)
         }
 
     return {"status": "not_started", "workspace_id": workspace_id}
+
+
+@router.get("/snapshot/stream/{workspace_id}")
+async def snapshot_stream(workspace_id: str, user_id: str = Depends(get_user_id)):
+    """
+    Server-Sent Events (SSE) stream of consolidation progress.
+
+    Frontend opens this connection and receives real-time updates as documents
+    are indexed, clustered, and organized. Connection stays open until the job
+    completes or an error occurs.
+
+    Returns a stream of newline-delimited JSON events.
+    """
+    await verify_workspace_ownership(workspace_id, user_id)
+
+    async def event_stream():
+        """Generator that yields SSE-formatted events."""
+        last_state = {}
+        check_interval = 0.5  # Check every 500ms
+        max_checks = 3600  # 30 minutes max
+        checks = 0
+
+        while checks < max_checks:
+            checks += 1
+
+            # Get current job state
+            current_state = _jobs.get(workspace_id, {})
+
+            # If state changed, emit event
+            if current_state != last_state:
+                # Send progress event
+                event_data = {
+                    "type": "progress",
+                    "timestamp": asyncio.get_event_loop().time(),
+                    **current_state,  # Include all job metrics
+                }
+                yield f"data: {json.dumps(event_data)}\n\n"
+                last_state = current_state.copy()
+
+            # Check if job is done
+            if current_state.get("status") in ["done", "failed"]:
+                # If done, add MCP URL
+                if current_state.get("status") == "done":
+                    mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
+                    final_event = {
+                        "type": "complete",
+                        "mcp_url": f"{mcp_url}?workspace_id={workspace_id}",
+                        **current_state,
+                    }
+                    yield f"data: {json.dumps(final_event)}\n\n"
+                break
+
+            # Wait before checking again
+            await asyncio.sleep(check_interval)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 _cluster_jobs: Dict[str, Dict[str, Any]] = {}

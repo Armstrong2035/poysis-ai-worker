@@ -62,6 +62,8 @@ async def gdrive_connect(
     and syncs to consolidation_workspaces.
     """
     try:
+        print(f"[SOURCES] gdrive_connect: workspace_id={workspace_id}, user_id={user_id}, email={google_account_email}")
+
         # 1. SECURITY: Verify user owns this workspace
         workspace = await db.get_workspace(workspace_id)
         if not workspace:
