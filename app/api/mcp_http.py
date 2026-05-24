@@ -9,7 +9,6 @@ Claude calls this endpoint with tool names and parameters.
 """
 
 from fastapi import APIRouter, Query, HTTPException
-from app.api.security import verify_workspace_ownership
 from app.primitives.database import DatabaseService
 from app.primitives.knowledge.embedder import Embedder
 from app.primitives.knowledge.vector_store import VectorService
@@ -17,6 +16,25 @@ from app.primitives.knowledge.vector_store import VectorService
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 db = DatabaseService()
 
+
+async def _validate_workspace(workspace_id: str) -> bool:
+    """Verify workspace exists and has been set up (has consolidation data)."""
+    if not workspace_id or workspace_id.strip() == "":
+        raise HTTPException(status_code=400, detail="workspace_id required")
+
+    try:
+        topics = await db.get_topics(workspace_id)
+        if not topics:
+            raise HTTPException(
+                status_code=404,
+                detail="Workspace not found or hasn't completed consolidation yet"
+            )
+        return True
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[MCP] Error validating workspace: {e}")
+        raise HTTPException(status_code=500, detail="Failed to validate workspace")
 
 
 @router.get("/")
@@ -27,9 +45,7 @@ async def mcp_tools_list(workspace_id: str = Query(...)):
     Returns the list of available tools Claude can call.
     Called when Claude first connects to this MCP server.
     """
-    # Validate workspace_id is provided
-    if not workspace_id or workspace_id.strip() == "":
-        raise HTTPException(status_code=400, detail="workspace_id required")
+    await _validate_workspace(workspace_id)
 
     return {
         "tools": [
@@ -95,9 +111,7 @@ async def call_mcp_tool(
 
     This endpoint routes to the appropriate retrieval logic.
     """
-    # Validate workspace_id
-    if not workspace_id or workspace_id.strip() == "":
-        raise HTTPException(status_code=400, detail="workspace_id required")
+    await _validate_workspace(workspace_id)
 
     if tool_name == "retrieve_from_knowledge_base":
         query = kwargs.get("query")
@@ -190,8 +204,7 @@ async def mcp_endpoint_info(workspace_id: str = Query(...)):
     """
     Returns info about this MCP endpoint for debugging.
     """
-    if not workspace_id or workspace_id.strip() == "":
-        raise HTTPException(status_code=400, detail="workspace_id required")
+    await _validate_workspace(workspace_id)
 
     return {
         "workspace_id": workspace_id,

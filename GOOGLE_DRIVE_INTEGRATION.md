@@ -33,14 +33,16 @@ POST /api/auth/google-drive/callback
 
 ### POST `/sources/gdrive/connect`
 
-Called by frontend callback after OAuth exchange.
+Called by frontend callback after OAuth exchange. Handles all token management and workspace linkage.
 
 **Parameters (Query):**
 - `workspace_id` (required): Which workspace this connection is for
+  - User can connect different Drive accounts to different workspaces
+  - Must be a workspace the user owns (ownership verified server-side)
 - `google_account_email` (required): Email of the Google account
 - `access_token` (required): OAuth access token from Google
 - `refresh_token` (optional): OAuth refresh token
-- `token_expiry` (optional): Token expiration timestamp
+- `token_expiry` (optional): Token expiration timestamp (ISO 8601)
 
 **Response:**
 ```json
@@ -53,11 +55,18 @@ Called by frontend callback after OAuth exchange.
 ```
 
 **What it does:**
-1. Saves tokens to `drive_connections` table (user-specific, encrypted)
-2. Calls Google Drive API to verify the token works
-3. Counts accessible documents
-4. Syncs tokens to `consolidation_workspaces` table so the snapshot pipeline can use them
-5. Returns document count to frontend for display
+1. ✅ **Security:** Verifies user owns the workspace (403 if not)
+2. ✅ **Saves tokens** to `drive_connections` table (user + workspace specific, encrypted)
+3. ✅ **Validates token** by calling Google Drive API
+4. ✅ **Counts documents** in Drive
+5. ✅ **Updates doc_count** in `drive_connections`
+6. ✅ **Syncs tokens** to `consolidation_workspaces` so snapshot pipeline can use them
+7. ✅ **Sets up sync callback** so worker updates `last_synced_at` after snapshot completes
+
+**Error responses:**
+- `403 Forbidden`: User doesn't own this workspace
+- `404 Not Found`: Workspace doesn't exist
+- `500 Internal Server Error`: Token validation failed or DB error
 
 ### GET `/sources/drive/connections`
 
@@ -202,6 +211,40 @@ This is handled transparently by the existing `google_auth.py` module.
   - Should be encrypted at rest (Supabase Vault in production)
 - Tokens never appear in logs or frontend code
 - Frontend only handles OAuth URLs and redirects, not tokens directly
+
+## Multi-User Workspace Architecture
+
+The system is designed to support collaborative workspaces where multiple users can access the same knowledge base:
+
+### Workspace Members Table
+
+```sql
+CREATE TABLE public.workspace_members (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  user_id UUID NOT NULL REFERENCES auth.users(id),
+  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'member', 'viewer')),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(workspace_id, user_id)
+);
+```
+
+**Purpose:** Track which users have access to which workspaces. Future releases will allow workspace owners to invite collaborators.
+
+### Access Control
+
+- **Phase 1 (Current):** Each workspace is owned by one user. The `drive_connections` table stores workspace_id to support multiple Drive accounts per workspace.
+- **Phase 2 (Upcoming):** Multiple users can be members of the same workspace. All members share access to the consolidated knowledge and Drive tokens.
+
+### Verification Logic
+
+When accessing endpoints like `/consolidation/snapshot`, the system:
+1. Checks `workspace_members` table for user access (owner, member, or viewer role)
+2. Falls back to checking if user owns the workspace (backward compatibility)
+3. Auto-adds workspace owners to `workspace_members` for future consistency
+
+This ensures the system works seamlessly before and after multi-user features are enabled.
 
 ## Environment Setup (Frontend Dev)
 

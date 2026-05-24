@@ -24,16 +24,8 @@ In your callback route after exchanging the auth code:
 // After exchanging code for tokens:
 const tokens = await exchangeGoogleCode(code);  // access_token, refresh_token, expiry
 
-// Save to Supabase (frontend does this)
-await supabase.from('drive_connections').insert({
-  user_id: user.id,
-  google_account_email: tokens.email,
-  access_token: tokens.access_token,
-  refresh_token: tokens.refresh_token,
-  token_expiry: tokens.expiry_date,
-});
-
-// Notify worker to validate and sync
+// Notify worker to validate, save, and sync
+// Worker will save to drive_connections AND consolidation_workspaces
 const response = await fetch('http://your-worker-url/sources/gdrive/connect', {
   method: 'POST',
   headers: {
@@ -41,7 +33,7 @@ const response = await fetch('http://your-worker-url/sources/gdrive/connect', {
     'Content-Type': 'application/x-www-form-urlencoded',
   },
   body: new URLSearchParams({
-    workspace_id: workspaceId,
+    workspace_id: workspaceId,  // REQUIRED: which workspace this connects to
     google_account_email: tokens.email,
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token || '',
@@ -50,11 +42,18 @@ const response = await fetch('http://your-worker-url/sources/gdrive/connect', {
 });
 
 const result = await response.json();
-// result = { status: "connected", doc_count: 247 }
+// result = {
+//   status: "connected",
+//   workspace_id: "ws_123",
+//   google_account_email: "user@gmail.com",
+//   doc_count: 247
+// }
 
 // Update UI with doc_count, then redirect
 redirect('/dashboard?drive=connected&docs=' + result.doc_count);
 ```
+
+**Important:** Do NOT pre-save to `drive_connections`. The worker does this. You only call the endpoint.
 
 ### 2. Update Your SourcesModal
 
@@ -176,6 +175,24 @@ Then use in callback:
 const workerUrl = process.env.NEXT_PUBLIC_WORKER_URL || 'http://localhost:8000';
 const response = await fetch(`${workerUrl}/sources/gdrive/connect`, { ... });
 ```
+
+## MCP URL for Claude Integration
+
+After clustering completes, the backend automatically generates an MCP URL that users can add to Claude.ai as a Cloud Connector:
+
+**Where the URL comes from:**
+- Call `GET /consolidation/cluster/status/{workspace_id}`
+- When status is "done", response includes `mcp_url` field
+- Example: `https://poysis.ai/mcp?workspace_id=ws_abc123`
+
+**How users add it to Claude:**
+1. Copy the MCP URL from the dashboard
+2. Go to Claude.ai → Settings → Cloud Connectors
+3. Add Custom MCP Server
+4. Paste the URL
+5. Start asking questions about their knowledge base
+
+**Important:** The MCP URL is workspace-specific. Each workspace gets its own URL. Multiple users in the same workspace (future feature) will share the same MCP URL.
 
 ---
 

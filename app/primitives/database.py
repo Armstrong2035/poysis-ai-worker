@@ -45,13 +45,61 @@ class DatabaseService:
         """Upsert workspace record in the registry."""
         if not self.client:
             return False
-            
+
         try:
             self.client.table("workspaces").upsert(workspace_data).execute()
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to save workspace: {e}")
             return False
+
+    async def has_workspace_access(self, workspace_id: str, user_id: str) -> bool:
+        """Check if user has any access (owner, member, or viewer) to workspace."""
+        if not self.client:
+            return False
+        try:
+            response = self.client.table("workspace_members").select("id").eq("workspace_id", workspace_id).eq("user_id", user_id).execute()
+            return bool(response.data)
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to check workspace access: {e}")
+            return False
+
+    async def add_workspace_member(self, workspace_id: str, user_id: str, role: str = "member") -> bool:
+        """Add a user to a workspace with specified role."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("workspace_members").upsert({
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "role": role,
+            }, on_conflict="workspace_id,user_id").execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to add workspace member: {e}")
+            return False
+
+    async def remove_workspace_member(self, workspace_id: str, user_id: str) -> bool:
+        """Remove a user from a workspace."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("workspace_members").delete().eq("workspace_id", workspace_id).eq("user_id", user_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to remove workspace member: {e}")
+            return False
+
+    async def get_workspace_members(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """Get all members of a workspace."""
+        if not self.client:
+            return []
+        try:
+            response = self.client.table("workspace_members").select("*").eq("workspace_id", workspace_id).execute()
+            return response.data or []
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to get workspace members: {e}")
+            return []
 
     async def update_credits(self, workspace_id: str, amount: int) -> bool:
         """Atomically update credit balance."""
