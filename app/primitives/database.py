@@ -53,6 +53,24 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to save workspace: {e}")
             return False
 
+    async def create_workspace(self, workspace_id: str, user_id: str, name: str = "My Workspace") -> bool:
+        """Create a new workspace for a user."""
+        if not self.client:
+            return False
+
+        try:
+            self.client.table("workspaces").insert({
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "name": name,
+            }).execute()
+            # Auto-add creator as owner in workspace_members
+            await self.add_workspace_member(workspace_id, user_id, role="owner")
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to create workspace: {e}")
+            return False
+
     async def has_workspace_access(self, workspace_id: str, user_id: str) -> bool:
         """Check if user has any access (owner, member, or viewer) to workspace."""
         if not self.client:
