@@ -84,6 +84,157 @@ class CategorizerEngine:
         self.db = db
         self.vector_service = vector_service
 
+    async def _detect_stories(
+        self,
+        topics_data: List[Dict],
+        model
+    ) -> List[Dict[str, Any]]:
+        """Detect narrative threads connecting topics."""
+        if not topics_data:
+            return []
+
+        # Build rich topic descriptions with IDs for story detection
+        topic_descriptions = "\n".join([
+            f"- ID {t['topic_id']}: {t['label']} ({t['doc_count']} docs)"
+            for t in topics_data
+        ])
+
+        # Create label-to-ID mapping for fallback
+        label_to_id = {t['label']: t['topic_id'] for t in topics_data}
+
+        # Ask Gemini to identify story threads
+        prompt = f"""Analyze this knowledge base and identify the major narrative threads —
+implicit stories that connect multiple topics together.
+
+For EACH major story, describe:
+- What is the narrative arc? (which topics form the story in order)
+- What's the central theme connecting them?
+- How compelling/coherent is this story (0-1)?
+
+Topics (use the numeric IDs):
+{topic_descriptions}
+
+Respond with ONLY a valid JSON array (up to 7 major stories):
+[
+  {{
+    "title": "Story title (e.g., 'Tech & Society')",
+    "description": "1-2 sentence description of what this story explores",
+    "topic_sequence": [1, 5, 8],
+    "reasoning": "Why these topics form a coherent narrative",
+    "strength": 0.95
+  }},
+  ...
+]
+
+Only include stories with strength >= 0.7. Order by strength descending."""
+
+        try:
+            response = await asyncio.to_thread(model.generate_content, prompt)
+            stories = _parse_response(response.text)
+
+            if not isinstance(stories, list):
+                print(f"[Stories] Invalid response format")
+                return []
+
+            # Validate and enrich stories
+            validated_stories = []
+            for idx, story in enumerate(stories):
+                if all(k in story for k in ["title", "topic_sequence", "strength"]):
+                    topic_seq = story.get("topic_sequence", [])
+
+                    # Map labels to IDs if needed (fallback for when Gemini returns labels)
+                    mapped_seq = []
+                    for item in topic_seq:
+                        if isinstance(item, int):
+                            mapped_seq.append(item)
+                        elif isinstance(item, str) and item in label_to_id:
+                            mapped_seq.append(label_to_id[item])
+
+                    story["story_id"] = idx
+                    story["topic_sequence"] = mapped_seq
+                    story["doc_count"] = sum(
+                        t["doc_count"] for t in topics_data
+                        if t["topic_id"] in mapped_seq
+                    )
+                    validated_stories.append(story)
+                    print(f"[Stories] {story['title']}: {story['strength']} ({story['doc_count']} docs)")
+
+            return validated_stories
+
+        except Exception as e:
+            print(f"[Stories] Error detecting narratives: {e}")
+            return []
+
+    async def _analyze_semantic_content(
+        self,
+        all_docs: List[Dict],
+        topics_data: List[Dict],
+        source_to_cat: Dict[str, Dict],
+        model
+    ) -> Dict[int, Dict[str, Any]]:
+        """Analyze semantic content of each topic using Gemini."""
+        semantic_results = {}
+
+        # Build topic -> docs mapping
+        topic_docs = {}
+        for topic in topics_data:
+            topic_id = topic["topic_id"]
+            topic_docs[topic_id] = [
+                d for d in all_docs
+                if source_to_cat.get(d["source_id"], {}).get("id") == topic_id
+            ]
+
+        # Analyze each topic's semantic content
+        for topic in topics_data:
+            topic_id = topic["topic_id"]
+            label = topic["label"]
+            docs = topic_docs.get(topic_id, [])
+
+            if not docs:
+                continue
+
+            # Sample docs (up to 5)
+            sample_size = min(5, len(docs))
+            sample = docs[:sample_size]
+
+            # Build sample text
+            doc_previews = []
+            for doc in sample:
+                title = doc.get("title", "Untitled")
+                snippet = doc.get("snippet", "")[:400]
+                doc_previews.append(f'[{title}]\n{snippet}')
+
+            sample_text = "\n---\n".join(doc_previews)
+
+            # Ask Gemini about this topic
+            prompt = f"""Analyze these {len(sample)} document samples from a knowledge cluster labeled "{label}".
+
+What is this cluster actually about? What are the core themes and topics?
+What would this be useful for?
+
+Samples:
+{sample_text}
+
+Respond with ONLY valid JSON:
+{{
+  "semantic_summary": "1-2 sentence summary of what this cluster is really about",
+  "key_themes": ["theme1", "theme2", "theme3"],
+  "suggested_use_cases": ["use case 1", "use case 2"]
+}}"""
+
+            try:
+                response = await asyncio.to_thread(model.generate_content, prompt)
+                analysis = _parse_response(response.text)
+                if analysis:
+                    semantic_results[topic_id] = analysis
+                    print(f"[Semantic] {label}: {analysis.get('semantic_summary', 'N/A')[:80]}...")
+                else:
+                    print(f"[Semantic] Failed to parse response for topic {topic_id}")
+            except Exception as e:
+                print(f"[Semantic] Error analyzing topic {topic_id}: {e}")
+
+        return semantic_results
+
     def _get_model(self):
         import google.generativeai as genai
         api_key = os.getenv("GEMINI_API_KEY")
@@ -152,9 +303,31 @@ class CategorizerEngine:
                 for sid in source_ids:
                     source_to_cat[sid] = {"id": top_id, "label": cat_name}
 
-        # Persist categories (clear BERTopic topics first)
+        # Persist categories (clear previous clustering)
         await self.db.clear_topics(workspace_id)
+        await self.db.clear_stories(workspace_id)
+
+        # Run semantic analysis AND story detection in parallel
+        print(f"[Categorizer] Analyzing semantic content and detecting stories...")
+        semantic_task = asyncio.create_task(
+            self._analyze_semantic_content(docs, topics_data, source_to_cat, model)
+        )
+        stories_task = asyncio.create_task(
+            self._detect_stories(topics_data, model)
+        )
+
+        semantic_data = await semantic_task
+        stories_data = await stories_task
+
+        # Enrich topics with semantic analysis
+        for topic in topics_data:
+            if topic["topic_id"] in semantic_data:
+                topic.update(semantic_data[topic["topic_id"]])
+
+        # Save both topics and stories
         await self.db.save_topics(workspace_id, topics_data)
+        if stories_data:
+            await self.db.save_stories(workspace_id, stories_data)
 
         # Update vector metadata with category assignment
         vector_refs = await asyncio.to_thread(self.vector_service.fetch_vector_source_ids, namespace)

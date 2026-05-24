@@ -109,27 +109,38 @@ async def detect_build_promises(
         # For testing, allow without workspace validation
         pass
 
-    # Fetch topics for the workspace
+    # Fetch both topics and stories for the workspace
     try:
         topics = await db.get_topics(workspace_id)
+        stories = await db.get_stories(workspace_id)
     except Exception as e:
-        print(f"[OUROBOROS] Error fetching topics: {e}")
+        print(f"[OUROBOROS] Error fetching knowledge: {e}")
         return {"workspace_id": workspace_id, "promises": []}
 
     if not topics:
         return {"workspace_id": workspace_id, "promises": []}
 
-    # Build a description of their knowledge
+    # Build rich descriptions of topics and stories
     topic_text = "\n".join([
         f"- {t['label']}: {t['doc_count']} documents"
+        + (f"\n  About: {t.get('semantic_summary', '')}" if t.get('semantic_summary') else "")
+        + (f"\n  Themes: {', '.join(t.get('key_themes', []))}" if t.get('key_themes') else "")
         for t in topics
     ])
+
+    # Add narrative insights if stories exist
+    story_text = ""
+    if stories:
+        story_text = "\n\nNarrative threads your knowledge tells:\n" + "\n".join([
+            f"- {s['title']}: {s['description']} (strength: {s['strength']})"
+            for s in stories[:5]  # Top 5 stories
+        ])
 
     # Call Gemini to analyze and suggest promises
     prompt = f"""Analyze this user's knowledge base and suggest what AI agents/bots they could build.
 
 Their consolidated topics:
-{topic_text}
+{topic_text}{story_text}
 
 Available bot templates:
 - onboarding_bot: Guide new hires through onboarding
@@ -137,6 +148,7 @@ Available bot templates:
 - decision_tracker: Track and recall company decisions
 - research_bot: Research and synthesize information
 - knowledge_base_search: Smart search interface
+- narrative_guide_bot: Guide users through interconnected story threads
 
 For each potential bot, consider:
 1. Do they have enough relevant documents? (at least 5)

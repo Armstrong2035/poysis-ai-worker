@@ -10,14 +10,23 @@ class DatabaseService:
         self.url = os.getenv("SUPABASE_PRODUCT_URL")
         # Note: SERVICE_ROLE_KEY is required for backend operations (RLS bypass)
         self.key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        
+        self._client: Client = None
+
         if not self.url or not self.key:
-            # We don't raise here yet to allow the app to start, 
-            # but methods will fail if keys are missing.
             print("[DATABASE] Warning: Supabase credentials missing.")
-            self.client = None
-        else:
-            self.client: Client = create_client(self.url, self.key)
+
+    @property
+    def client(self) -> Client:
+        """Lazy-initialize client to bypass schema cache on migrations."""
+        if self._client is None:
+            if self.url and self.key:
+                self._client = create_client(self.url, self.key)
+        return self._client
+
+    def refresh_client(self) -> None:
+        """Force reconnection to pick up schema changes (e.g., after migrations)."""
+        self._client = None
+        _ = self.client  # Re-initialize
 
     async def get_workspace(self, workspace_id: str) -> Optional[Dict[str, Any]]:
         """Fetch workspace details using workspace_id (mapped to workspace_id column)."""
@@ -219,6 +228,9 @@ class DatabaseService:
                     "keywords": t.get("keywords", []),
                     "doc_count": t.get("doc_count", 0),
                     "parent_topic_id": t.get("parent_topic_id"),
+                    "semantic_summary": t.get("semantic_summary"),
+                    "key_themes": t.get("key_themes", []),
+                    "suggested_use_cases": t.get("suggested_use_cases", []),
                     "updated_at": "now()",
                 }
                 for t in topics
@@ -229,6 +241,57 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to save topics: {e}")
 
+    async def save_stories(self, workspace_id: str, stories: list) -> None:
+        """Upsert story narratives for a workspace."""
+        if not self.client or not stories:
+            return
+        try:
+            rows = [
+                {
+                    "workspace_id": workspace_id,
+                    "story_id": s["story_id"],
+                    "title": s.get("title"),
+                    "description": s.get("description"),
+                    "topic_sequence": s.get("topic_sequence", []),
+                    "reasoning": s.get("reasoning"),
+                    "strength": float(s.get("strength", 0.5)),
+                    "doc_count": s.get("doc_count", 0),
+                    "updated_at": "now()",
+                }
+                for s in stories
+            ]
+            self.client.table("consolidation_stories").upsert(
+                rows, on_conflict="workspace_id,story_id"
+            ).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save stories: {e}")
+
+    async def get_stories(self, workspace_id: str) -> list:
+        """Fetch all stories for a workspace."""
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("consolidation_stories")
+                .select("story_id, title, description, topic_sequence, reasoning, strength, doc_count")
+                .eq("workspace_id", workspace_id)
+                .order("strength", desc=True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch stories: {e}")
+            return []
+
+    async def clear_stories(self, workspace_id: str) -> None:
+        """Delete all stories for a workspace before re-saving."""
+        if not self.client:
+            return
+        try:
+            self.client.table("consolidation_stories").delete().eq("workspace_id", workspace_id).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to clear stories: {e}")
+
     async def get_topics(self, workspace_id: str) -> list:
         """Fetch all topics for a workspace."""
         if not self.client:
@@ -236,7 +299,7 @@ class DatabaseService:
         try:
             res = (
                 self.client.table("consolidation_topics")
-                .select("topic_id, label, keywords, doc_count, parent_topic_id, updated_at")
+                .select("topic_id, label, keywords, doc_count, parent_topic_id, semantic_summary, key_themes, suggested_use_cases, updated_at")
                 .eq("workspace_id", workspace_id)
                 .order("doc_count", desc=True)
                 .execute()

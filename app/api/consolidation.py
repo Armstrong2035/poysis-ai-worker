@@ -315,3 +315,22 @@ def _generate_mcp_url(workspace_id: str) -> str:
 async def get_topics(workspace_id: str):
     topics = await db.get_topics(workspace_id)
     return {"workspace_id": workspace_id, "topics": topics}
+
+
+@router.get("/stories/{workspace_id}")
+async def get_stories(workspace_id: str):
+    stories = await db.get_stories(workspace_id)
+    return {"workspace_id": workspace_id, "stories": stories}
+
+
+@router.get("/knowledge/{workspace_id}")
+async def get_knowledge(workspace_id: str):
+    """Get both topical and narrative organization of knowledge."""
+    topics = await db.get_topics(workspace_id)
+    stories = await db.get_stories(workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "topics": topics,
+        "stories": stories,
+        "views": ["topical", "narrative"]
+    }

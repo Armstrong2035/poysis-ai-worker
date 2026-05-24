@@ -18,6 +18,7 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 db = DatabaseService()
 
 
+
 @router.get("/")
 async def mcp_tools_list(workspace_id: str = Query(...)):
     """
