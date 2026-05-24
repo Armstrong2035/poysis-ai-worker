@@ -87,6 +87,9 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
 
         cluster_result = await clustering_engine.run_clustering(workspace_id)
 
+        # Update drive connection's last_synced_at to mark snapshot as complete
+        await db.mark_drive_connection_synced(workspace_id)
+
         # Final result
         final_result = {
             "status": "done",

@@ -58,13 +58,25 @@ async def gdrive_connect(
     Sync Google Drive connection from drive_connections → consolidation_workspaces.
 
     Called by frontend after successful OAuth when user approves Drive access.
-    Saves tokens to drive_connections, validates the token, counts documents,
+    Verifies workspace ownership, saves tokens, validates the token, counts documents,
     and syncs to consolidation_workspaces.
     """
     try:
-        # 1. Save the tokens to drive_connections (frontend provides them from OAuth)
+        # 1. SECURITY: Verify user owns this workspace
+        workspace = await db.get_workspace(workspace_id)
+        if not workspace:
+            raise HTTPException(
+                status_code=404, detail="Workspace not found"
+            )
+        if workspace.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=403, detail="You do not have access to this workspace"
+            )
+
+        # 2. Save the tokens to drive_connections (workspace-specific)
         saved = await db.save_drive_connection(
             user_id=user_id,
+            workspace_id=workspace_id,
             google_account_email=google_account_email,
             access_token=access_token,
             refresh_token=refresh_token,
@@ -73,20 +85,20 @@ async def gdrive_connect(
         if not saved:
             raise HTTPException(status_code=500, detail="Failed to save connection")
 
-        # 2. Get the connection record to get its ID
-        conn = await db.get_drive_connection(user_id, google_account_email)
+        # 3. Get the connection record to get its ID
+        conn = await db.get_drive_connection(user_id, workspace_id, google_account_email)
         if not conn:
             raise HTTPException(status_code=500, detail="Connection save failed")
 
         conn_id = conn["id"]
 
-        # 3. Test token (call Drive API to verify it works)
+        # 4. Test token (call Drive API to verify it works)
         doc_count = await _count_google_drive_files(access_token)
 
-        # 4. Update doc_count in drive_connections
+        # 5. Update doc_count in drive_connections
         await db.update_drive_connection_doc_count(conn_id, doc_count)
 
-        # 5. SYNC: Copy tokens to consolidation_workspaces for snapshot to use
+        # 6. SYNC: Copy tokens to consolidation_workspaces for snapshot to use
         await db.save_google_tokens(
             workspace_id=workspace_id,
             access_token=access_token,
@@ -116,17 +128,25 @@ async def gdrive_connect(
 
 @router.post("/gdrive/disconnect")
 async def gdrive_disconnect(
+    workspace_id: str = Query(...),
     google_account_email: str = Query(...),
     user_id: str = Depends(get_user_id),
 ):
-    """Remove a Google Drive connection."""
+    """Remove a Google Drive connection for a workspace."""
     try:
-        success = await db.delete_drive_connection(user_id, google_account_email)
+        # Verify workspace ownership
+        workspace = await db.get_workspace(workspace_id)
+        if not workspace or workspace.get("user_id") != user_id:
+            raise HTTPException(
+                status_code=403, detail="You do not have access to this workspace"
+            )
+
+        success = await db.delete_drive_connection(user_id, workspace_id, google_account_email)
         if not success:
             raise HTTPException(status_code=404, detail="Connection not found")
 
-        print(f"[SOURCES] Drive disconnected: {google_account_email}")
-        return {"status": "disconnected", "google_account_email": google_account_email}
+        print(f"[SOURCES] Drive disconnected: {workspace_id} / {google_account_email}")
+        return {"status": "disconnected", "workspace_id": workspace_id, "google_account_email": google_account_email}
 
     except HTTPException:
         raise
@@ -138,10 +158,13 @@ async def gdrive_disconnect(
 
 
 @router.get("/drive/connections")
-async def list_drive_connections(user_id: str = Depends(get_user_id)):
-    """List all Google Drive connections for the user."""
+async def list_drive_connections(
+    user_id: str = Depends(get_user_id),
+    workspace_id: str = Query(None),
+):
+    """List Google Drive connections for the user, optionally filtered by workspace."""
     try:
-        connections = await db.list_drive_connections(user_id)
+        connections = await db.list_drive_connections(user_id, workspace_id)
         return {"connections": connections}
     except Exception as e:
         print(f"[SOURCES] Error listing Drive connections: {e}")
