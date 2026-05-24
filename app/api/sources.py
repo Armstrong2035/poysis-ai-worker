@@ -2,6 +2,9 @@
 from fastapi import APIRouter, HTTPException, Depends, Form, Query
 import os
 from typing import Optional
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 from app.api.security import get_user_id
 from app.primitives.database import DatabaseService
@@ -14,10 +17,6 @@ db = DatabaseService()
 async def _count_google_drive_files(access_token: str) -> int:
     """Count accessible files in Google Drive."""
     try:
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
-        from googleapiclient.discovery import build
-
         creds = Credentials(token=access_token)
         service = build("drive", "v3", credentials=creds)
 
