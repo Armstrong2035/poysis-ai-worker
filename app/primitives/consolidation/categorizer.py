@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from typing import Dict, Any, List, Optional
+import google.generativeai as genai
 
 from app.primitives.database import DatabaseService
 from app.primitives.knowledge.vector_store import VectorService
@@ -236,7 +237,6 @@ Respond with ONLY valid JSON:
         return semantic_results
 
     def _get_model(self):
-        import google.generativeai as genai
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set")
