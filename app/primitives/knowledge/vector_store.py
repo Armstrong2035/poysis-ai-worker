@@ -8,6 +8,17 @@ from typing import List, Dict, Any, Optional
 _CANDIDATE_CEILING = 50
 
 
+def _strip_null_bytes(value):
+    """Postgres JSONB rejects \\u0000. PDFs and Office docs sometimes embed them."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    return value
+
+
 class VectorService:
     def __init__(self):
         self.conn_str = os.getenv("SUPABASE_DIRECT_CONNECTION_STRING")
@@ -51,7 +62,7 @@ class VectorService:
                     v["id"],
                     namespace,
                     "[" + ",".join(str(x) for x in v["values"]) + "]",
-                    json.dumps(v.get("metadata", {})),
+                    json.dumps(_strip_null_bytes(v.get("metadata", {}))),
                 )
                 for v in batch
             ]

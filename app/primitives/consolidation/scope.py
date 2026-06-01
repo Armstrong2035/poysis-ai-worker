@@ -5,7 +5,7 @@ from pydantic import BaseModel, field_validator
 class ScopeConfig(BaseModel):
     workspace_id: str
     sources: List[Literal["google_drive", "gmail", "recordings"]]
-    time_window_days: int = 90          # 0 = all time
+    time_window_days: int = 0           # 0 = all time (beta: maximize coverage)
     doc_limit: int = 500                # -1 = unlimited
     drive_folder_ids: List[str] = []    # [] = all accessible folders
     gmail_labels: List[str] = ["INBOX"]

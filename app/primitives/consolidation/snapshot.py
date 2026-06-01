@@ -36,7 +36,7 @@ class SnapshotRunner:
     async def discover(self) -> dict:
         total_files = 0
         total_bytes = 0
-        breakdown = {"document": 0, "spreadsheet": 0, "pdf": 0}
+        breakdown = {"document": 0, "spreadsheet": 0, "pdf": 0, "office_doc": 0}
         mime_types_found = {}
         large_files = []
 
@@ -124,7 +124,9 @@ class SnapshotRunner:
 
                 tasks.append(asyncio.create_task(fetch_and_parse(item)))
 
-            if self.scope.doc_limit > 0 and items_seen >= self.scope.doc_limit:
+            # Only signal "partial" if we actually created tasks (new files to process)
+            # AND we hit the limit. Otherwise an all-skipped iteration would loop forever.
+            if self.scope.doc_limit > 0 and len(tasks) >= self.scope.doc_limit:
                 self.has_more = True
 
             if not tasks:
@@ -165,6 +167,16 @@ class SnapshotRunner:
             file_path = await connector.fetch_file(item)
             try:
                 return await self._pdf_processor.process(item, file_path)
+            finally:
+                self._cleanup(file_path)
+
+        if item.content_type == "office_doc":
+            file_path = await connector.fetch_file(item)
+            try:
+                from llama_index.core.readers import SimpleDirectoryReader
+                docs = SimpleDirectoryReader(input_files=[file_path]).load_data()
+                text = "\n\n".join(d.text for d in docs if d.text)
+                return await self._doc_processor.process(item, text)
             finally:
                 self._cleanup(file_path)
 

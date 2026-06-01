@@ -54,10 +54,26 @@ class ConsolidationEngine:
         total_chunks = 0
         total_vectors = 0
         batch_number = 0
+        last_reported_docs = -1  # forces an initial event the moment the first doc completes
+
+        def _emit():
+            if progress_callback:
+                progress_callback({
+                    "vectors_indexed": total_vectors,
+                    "docs_processed": runner.docs_processed,
+                    "docs_skipped": runner.docs_skipped,
+                    "docs_orphaned": runner.docs_orphaned,
+                })
 
         async for chunk in runner.stream():
             batch.append(chunk)
             total_chunks += 1
+
+            # Fire progress on every doc completion, decoupled from embed batches.
+            # Otherwise small docs can fill a batch slowly and the UI looks frozen.
+            if runner.docs_processed != last_reported_docs:
+                _emit()
+                last_reported_docs = runner.docs_processed
 
             if len(batch) >= BATCH_SIZE:
                 documents = self._to_documents(batch, offset=total_chunks - len(batch))
@@ -67,13 +83,7 @@ class ConsolidationEngine:
                 print(f"[ConsolidationEngine] Batch {batch_number} — {indexed} vectors indexed")
                 await self._flush_completed_files(scope.workspace_id, runner)
                 batch.clear()
-                if progress_callback:
-                    progress_callback({
-                        "vectors_indexed": total_vectors,
-                        "docs_processed": runner.docs_processed,
-                        "docs_skipped": runner.docs_skipped,
-                        "docs_orphaned": runner.docs_orphaned,
-                    })
+                _emit()  # vectors_indexed changed
 
         # Embed any remaining chunks
         if batch:
@@ -82,13 +92,7 @@ class ConsolidationEngine:
             total_vectors += indexed
             print(f"[ConsolidationEngine] Final batch — {indexed} vectors indexed")
             await self._flush_completed_files(scope.workspace_id, runner)
-            if progress_callback:
-                progress_callback({
-                    "vectors_indexed": total_vectors,
-                    "docs_processed": runner.docs_processed,
-                    "docs_skipped": runner.docs_skipped,
-                    "docs_orphaned": runner.docs_orphaned,
-                })
+            _emit()
 
         return {
             "workspace_id": scope.workspace_id,

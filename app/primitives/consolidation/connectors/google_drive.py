@@ -22,9 +22,14 @@ SHEET_EXPORTABLE = {
 PDF_MIME = "application/pdf"
 BINARY_SPREADSHEETS = {"text/csv", "application/vnd.ms-excel",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+OFFICE_DOCS = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   # .docx
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", # .pptx
+}
 
 SUPPORTED_MIME_TYPES = (
-    set(TEXT_EXPORTABLE) | set(SHEET_EXPORTABLE) | {PDF_MIME} | BINARY_SPREADSHEETS
+    set(TEXT_EXPORTABLE) | set(SHEET_EXPORTABLE) | {PDF_MIME}
+    | BINARY_SPREADSHEETS | OFFICE_DOCS
 )
 
 
@@ -35,6 +40,8 @@ def _content_type_for_mime(mime: str) -> str:
         return "spreadsheet"
     if mime == PDF_MIME:
         return "pdf"
+    if mime in OFFICE_DOCS:
+        return "office_doc"
     return "document"
 
 
@@ -148,4 +155,6 @@ def _ext_from_mime(mime: str) -> str:
         "text/csv": ".csv",
         "application/vnd.ms-excel": ".xls",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     }.get(mime, ".bin")

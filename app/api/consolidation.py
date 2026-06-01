@@ -2,9 +2,13 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
 import asyncio
 import json
 import os
+
+# A snapshot job whose updated_at is older than this is considered orphaned.
+JOB_STALE_AFTER_SECONDS = 300
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
@@ -26,8 +30,8 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 class SnapshotRequest(BaseModel):
     workspace_id: str
     sources: List[str] = ["google_drive"]
-    time_window_days: int = 90
-    doc_limit: int = 300
+    time_window_days: int = 0   # 0 = all time (beta: maximize coverage)
+    doc_limit: int = 10000  # effectively "all" for beta; iteration loop only kicks in past this
     drive_folder_ids: List[str] = []
     cluster_instructions: List[dict] = []
 
@@ -55,6 +59,9 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
                     "docs_skipped": total_skipped + p["docs_skipped"],
                     "docs_orphaned": total_orphaned + p["docs_orphaned"],
                 })
+                # Heartbeat the DB row so stale-running detection knows we're alive.
+                # Fire-and-forget — failure to touch is non-fatal.
+                asyncio.create_task(db.touch_job(job_id))
 
             result = await engine.run_snapshot(current_scope, progress_callback=_on_progress)
 
@@ -156,10 +163,23 @@ async def run_snapshot(
     if _jobs.get(workspace_id, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="Snapshot already running for this workspace.")
 
-    # Check DB for running job
+    # Check DB for a running job that's still heartbeating. Stale rows
+    # (updated_at older than JOB_STALE_AFTER_SECONDS) get reaped first so they
+    # don't block forever after a crash or worker restart.
     latest_job = await db.get_latest_job(workspace_id, job_type="snapshot")
     if latest_job and latest_job.get("status") == "running":
-        raise HTTPException(status_code=409, detail="Snapshot already running for this workspace.")
+        updated_at_raw = latest_job.get("updated_at", "")
+        try:
+            updated_at = datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            updated_at = None
+        is_alive = (
+            updated_at is not None
+            and (datetime.now(timezone.utc) - updated_at).total_seconds() < JOB_STALE_AFTER_SECONDS
+        )
+        if is_alive:
+            raise HTTPException(status_code=409, detail="Snapshot already running for this workspace.")
+        await db.update_job(latest_job["id"], "failed", error="orphaned (no heartbeat)")
 
     access_token = await get_valid_token(workspace_id, db, user_id)
     if not access_token:
@@ -213,6 +233,26 @@ async def snapshot_status(workspace_id: str, user_id: str = Depends(get_user_id)
         }
 
     return {"status": "not_started", "workspace_id": workspace_id}
+
+
+@router.get("/indexed_count/{workspace_id}")
+async def indexed_count(workspace_id: str, user_id: str = Depends(get_user_id)):
+    """
+    Cumulative count of files in the workspace's knowledge base.
+    Source of truth for the dashboard "Docs indexed" metric — the SSE stream
+    only reflects the current run.
+    """
+    await verify_workspace_ownership(workspace_id, user_id)
+    indexed = await db.get_indexed_files(workspace_id)
+    # ORPHANED:* etags mark files we deliberately skipped (oversized, errored).
+    # They live in the same table but shouldn't count toward "indexed".
+    valid = sum(1 for etag in indexed.values() if not etag.startswith("ORPHANED:"))
+    orphaned = len(indexed) - valid
+    return {
+        "workspace_id": workspace_id,
+        "indexed": valid,
+        "orphaned": orphaned,
+    }
 
 
 @router.get("/snapshot/stream/{workspace_id}")

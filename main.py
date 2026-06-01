@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.blocks.retrieval.router import router as retrieval_router
@@ -18,7 +19,20 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-app = FastAPI(title="Poysis Worker API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Any consolidation_jobs left in 'running' state from a previous process
+    # are orphaned — the worker that owned them is gone. Flip them to 'failed'
+    # so the 409 "already running" guard doesn't block fresh requests forever.
+    from app.primitives.database import DatabaseService
+    reaped = await DatabaseService().reap_stale_jobs(stale_after_seconds=0)
+    if reaped:
+        print(f"[STARTUP] Reaped {reaped} orphaned 'running' consolidation job(s)")
+    yield
+
+
+app = FastAPI(title="Poysis Worker API", lifespan=lifespan)
 
 # Order matters: inner middleware (bottom) runs first
 app.add_middleware(ErrorHandlingMiddleware)

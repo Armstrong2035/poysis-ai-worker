@@ -13,7 +13,7 @@ class RawSourceItem(BaseModel):
     url: str
     etag: str
     last_modified: datetime
-    content_type: Literal["document", "spreadsheet", "pdf", "email_thread", "audio"]
+    content_type: Literal["document", "spreadsheet", "pdf", "office_doc", "email_thread", "audio"]
     fetch_url: Optional[str] = None
     mime_type: Optional[str] = None
     size_bytes: int = 0

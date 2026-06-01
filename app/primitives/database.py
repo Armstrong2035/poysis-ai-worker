@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -201,7 +202,7 @@ class DatabaseService:
                 "google_access_token": access_token,
                 "google_refresh_token": refresh_token,
                 "google_token_expiry": expiry,
-            }, on_conflict="consolidation_workspaces_workspace_user_unique").execute()
+            }, on_conflict="workspace_id,user_id").execute()
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to save Google tokens: {e}")
@@ -463,6 +464,42 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to fetch job: {e}")
             return None
+
+    async def touch_job(self, job_id: str) -> bool:
+        """Bump updated_at so stale-running detection knows the job is alive."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("consolidation_jobs").update(
+                {"updated_at": "now()"}
+            ).eq("id", job_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to touch job: {e}")
+            return False
+
+    async def reap_stale_jobs(self, stale_after_seconds: int = 300) -> int:
+        """Flip any 'running' job whose updated_at is older than the threshold to 'failed'."""
+        if not self.client:
+            return 0
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat()
+            res = (
+                self.client.table("consolidation_jobs")
+                .update({
+                    "status": "failed",
+                    "error": "orphaned (no heartbeat)",
+                    "updated_at": "now()",
+                    "completed_at": "now()",
+                })
+                .eq("status", "running")
+                .lt("updated_at", cutoff)
+                .execute()
+            )
+            return len(res.data) if res.data else 0
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to reap stale jobs: {e}")
+            return 0
 
     async def get_latest_job(self, workspace_id: str, job_type: str = None) -> Optional[dict]:
         """Fetch latest job for a workspace (optionally filtered by type)."""
