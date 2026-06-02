@@ -296,10 +296,9 @@ async def snapshot_stream(workspace_id: str, user_id: str = Depends(get_user_id)
             if current_state.get("status") in ["done", "failed"]:
                 # If done, add MCP URL
                 if current_state.get("status") == "done":
-                    mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
                     final_event = {
                         "type": "complete",
-                        "mcp_url": f"{mcp_url}?workspace_id={workspace_id}",
+                        "mcp_url": _generate_mcp_url(workspace_id),
                         **current_state,
                     }
                     yield f"data: {json.dumps(final_event)}\n\n"
@@ -407,9 +406,24 @@ async def cluster_status(workspace_id: str, user_id: str = Depends(get_user_id))
 
 
 def _generate_mcp_url(workspace_id: str) -> str:
-    """Generate MCP Cloud Connector URL for a workspace."""
-    mcp_base_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp")
-    return f"{mcp_base_url}?workspace_id={workspace_id}"
+    """
+    Per-workspace MCP server URL.
+    Path-based (not query-param) so each workspace has a distinct connector URL —
+    matches the MCP Streamable HTTP transport convention.
+    """
+    mcp_base_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp").rstrip("/")
+    return f"{mcp_base_url}/{workspace_id}"
+
+
+@router.get("/mcp_url/{workspace_id}")
+async def get_mcp_url(workspace_id: str, user_id: str = Depends(get_user_id)):
+    """
+    Returns the MCP connector URL for a workspace.
+    Used by the client to display a "Connect to Claude/ChatGPT" link any time —
+    not just after a snapshot completes.
+    """
+    await verify_workspace_ownership(workspace_id, user_id)
+    return {"workspace_id": workspace_id, "mcp_url": _generate_mcp_url(workspace_id)}
 
 
 @router.get("/topics/{workspace_id}")
