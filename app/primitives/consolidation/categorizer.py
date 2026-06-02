@@ -8,7 +8,7 @@ from app.primitives.database import DatabaseService
 from app.primitives.knowledge.vector_store import VectorService
 
 CATEGORIZER_MODEL = "gemini-3.1-flash-lite-preview"
-SUB_CLUSTER_THRESHOLD = 10
+SUB_CLUSTER_THRESHOLD = 25
 _GENERIC_TITLES = {"untitled", "sheet1", "sheet2", "document", "copy", "page", "file", "unnamed"}
 
 
@@ -25,12 +25,21 @@ def _is_descriptive(title: str) -> bool:
 
 def _build_prompt(docs: List[Dict], parent: Optional[str] = None) -> str:
     if parent:
-        context = f'These documents all belong to the category "{parent}". Break them into more specific sub-categories.'
+        context = (
+            f'These documents all belong to the category "{parent}". '
+            'Break them into 3–5 more specific sub-categories. '
+            'Prefer broader sub-groups over many narrow ones — only split out a sub-category '
+            'if it has at least 3 documents that genuinely don\'t fit the others.'
+        )
     else:
         context = (
-            'Group them into meaningful, specific categories — the kind a person would use to navigate their files. '
+            'Group them into 6–8 meaningful, specific top-level categories — the kind a person '
+            'would use to navigate their files. '
             'Good examples: "Bible Study Notes", "Bank Statements", "AI Business Research", "Real Estate", "Meeting Notes", "CRM Contacts". '
-            'Avoid vague categories like "Miscellaneous". Every document must be assigned to exactly one category.'
+            'Prefer broader, well-populated groups over many narrow ones. '
+            'Only create a separate category if it has at least 3 documents that genuinely don\'t fit elsewhere. '
+            'Hard cap: 8 categories. Avoid vague categories like "Miscellaneous". '
+            'Every document must be assigned to exactly one category.'
         )
 
     lines = []

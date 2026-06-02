@@ -192,20 +192,14 @@ async def query_knowledge_base(
     try:
         await verify_workspace_ownership(request.workspace_id, user_id)
 
-        embedder = Embedder()
-        vector_service = VectorService()
+        # Use the SAME embedder + namespace that consolidation wrote with.
+        # Embedder mismatch silently returns garbage scores; namespace mismatch returns nothing.
+        engine = KnowledgeEngine()
+        namespace = f"consolidation_{request.workspace_id}"
 
-        # Embed the query
-        query_embedding = await embedder.get_embedding(
-            request.query,
-            task_type="retrieval_query"
-        )
-
-        # Search vectors in the workspace namespace
-        namespace = request.workspace_id
-        raw_results = vector_service.query_vectors(
-            query_embedding=query_embedding,
-            namespace=namespace,
+        raw_results = await engine.fetch_raw(
+            notebook_id=namespace,
+            text=request.query,
             top_k=request.top_k * 2,
         )
 
