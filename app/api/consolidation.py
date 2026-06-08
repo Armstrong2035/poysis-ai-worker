@@ -411,7 +411,7 @@ def _generate_mcp_url(workspace_id: str) -> str:
     Path-based (not query-param) so each workspace has a distinct connector URL —
     matches the MCP Streamable HTTP transport convention.
     """
-    mcp_base_url = os.getenv("MCP_SERVER_URL", "http://localhost:8000/mcp").rstrip("/")
+    mcp_base_url = os.getenv("MCP_SERVER_URL", "https://poysis-ai-worker-production.up.railway.app/mcp").rstrip("/")
     return f"{mcp_base_url}/{workspace_id}"
 
 
