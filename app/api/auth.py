@@ -4,7 +4,6 @@ from fastapi.responses import RedirectResponse
 
 from app.primitives.consolidation.google_auth import (
     build_auth_url,
-    count_drive_files,
     exchange_code,
     fetch_google_email,
 )
@@ -69,11 +68,6 @@ async def google_callback(code: str | None = None, state: str | None = None, err
     if not saved:
         return _client_redirect("drive=error&reason=db")
 
-    conn = await db.get_drive_connection(user_id, workspace_id, google_email)
-    doc_count = await count_drive_files(tokens["access_token"])
-    if conn:
-        await db.update_drive_connection_doc_count(conn["id"], doc_count)
-
     synced = await db.save_google_tokens(
         workspace_id=workspace_id,
         user_id=user_id,
@@ -86,5 +80,5 @@ async def google_callback(code: str | None = None, state: str | None = None, err
         # Surface this rather than reporting success.
         return _client_redirect("drive=error&reason=consolidation_sync")
 
-    print(f"[AUTH] Drive connected: workspace={workspace_id} user={user_id} email={google_email} docs={doc_count}")
-    return _client_redirect(f"drive=connected&docs={doc_count}")
+    print(f"[AUTH] Drive connected: workspace={workspace_id} user={user_id} email={google_email}")
+    return _client_redirect("drive=connected")

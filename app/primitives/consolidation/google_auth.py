@@ -49,26 +49,6 @@ async def exchange_code(code: str) -> dict:
     }
 
 
-async def count_drive_files(access_token: str) -> int:
-    """Probe Drive for the user's accessible file count. Verifies the token works."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://www.googleapis.com/drive/v3/files",
-                params={"pageSize": 100, "q": "trashed=false", "fields": "files(id),nextPageToken"},
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        count = len(data.get("files", []))
-        if data.get("nextPageToken"):
-            count += 100
-        return count
-    except Exception as e:
-        print(f"[GOOGLE_AUTH] count_drive_files failed: {e}")
-        return 0
-
-
 async def fetch_google_email(access_token: str) -> str:
     """Look up the email of the Google account that authorized the token."""
     async with httpx.AsyncClient() as client:

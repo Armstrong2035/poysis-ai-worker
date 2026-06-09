@@ -2,9 +2,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Form, Query
 import os
 from typing import Optional
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 from app.api.security import get_user_id
 from app.primitives.database import DatabaseService
@@ -12,36 +9,6 @@ from app.primitives.consolidation.google_auth import get_valid_token
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 db = DatabaseService()
-
-
-async def _count_google_drive_files(access_token: str) -> int:
-    """Count accessible files in Google Drive."""
-    try:
-        creds = Credentials(token=access_token)
-        service = build("drive", "v3", credentials=creds)
-
-        results = service.files().list(
-            spaces="drive",
-            pageSize=1,
-            fields="files(id)",
-            q="trashed=false",
-        ).execute()
-
-        # Get total count from pagination info
-        # Note: Google Drive API doesn't directly return total count, so we'll estimate
-        # based on what we get. For MVP, just return files we can access.
-        files = results.get("files", [])
-        next_page_token = results.get("nextPageToken")
-
-        count = len(files)
-        if next_page_token:
-            # If there's a next page, there are definitely more files
-            count += 100  # Conservative estimate
-
-        return count
-    except Exception as e:
-        print(f"[SOURCES] Error counting Drive files: {e}")
-        return 0
 
 
 @router.post("/gdrive/connect")
@@ -91,15 +58,7 @@ async def gdrive_connect(
         if not conn:
             raise HTTPException(status_code=500, detail="Connection save failed")
 
-        conn_id = conn["id"]
-
-        # 4. Test token (call Drive API to verify it works)
-        doc_count = await _count_google_drive_files(access_token)
-
-        # 5. Update doc_count in drive_connections
-        await db.update_drive_connection_doc_count(conn_id, doc_count)
-
-        # 6. SYNC: Copy tokens to consolidation_workspaces for snapshot to use
+        # SYNC: Copy tokens to consolidation_workspaces for snapshot to use
         await db.save_google_tokens(
             workspace_id=workspace_id,
             access_token=access_token,
@@ -110,14 +69,13 @@ async def gdrive_connect(
 
         print(
             f"[SOURCES] Drive connected for workspace {workspace_id}: "
-            f"{google_account_email} ({doc_count} docs)"
+            f"{google_account_email}"
         )
 
         return {
             "status": "connected",
             "workspace_id": workspace_id,
             "google_account_email": google_account_email,
-            "doc_count": doc_count,
         }
 
     except HTTPException:
