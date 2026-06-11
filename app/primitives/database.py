@@ -247,13 +247,23 @@ class DatabaseService:
         if not self.client:
             return {}
         try:
-            res = (
-                self.client.table("consolidation_indexed_files")
-                .select("source_id, etag")
-                .eq("workspace_id", workspace_id)
-                .execute()
-            )
-            return {row["source_id"]: row["etag"] for row in res.data}
+            indexed = {}
+            page_size = 1000
+            offset = 0
+            while True:
+                res = (
+                    self.client.table("consolidation_indexed_files")
+                    .select("source_id, etag")
+                    .eq("workspace_id", workspace_id)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                for row in res.data:
+                    indexed[row["source_id"]] = row["etag"]
+                if len(res.data) < page_size:
+                    break
+                offset += page_size
+            return indexed
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to fetch indexed files: {e}")
             return {}

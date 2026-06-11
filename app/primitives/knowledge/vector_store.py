@@ -1,8 +1,8 @@
 import os
 import json
 import asyncio
-import psycopg2
 from psycopg2.extras import execute_values
+from psycopg2.pool import ThreadedConnectionPool
 from typing import List, Dict, Any, Optional
 
 _CANDIDATE_CEILING = 50
@@ -25,29 +25,51 @@ class VectorService:
         if not self.conn_str:
             raise ValueError("SUPABASE_DIRECT_CONNECTION_STRING not found in environment")
 
+        # Reuse a small pool instead of opening a fresh connection per batch.
+        # The connection string points at Supavisor's transaction-mode pooler
+        # (:6543), which recycles backend connections aggressively — repeated
+        # connect/close churn against it caused intermittent
+        # "connection already closed" failures during long ingestion runs.
+        self.pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=self.conn_str)
+        # getconn() raises immediately (doesn't block) once maxconn is checked
+        # out, so cap concurrent batch inserts at the pool size to avoid
+        # "connection pool exhausted" when a document yields many batches.
+        self._pool_sem = asyncio.Semaphore(10)
+
     def _get_conn(self):
-        return psycopg2.connect(self.conn_str)
+        return self.pool.getconn()
+
+    def _put_conn(self, conn):
+        # Discard broken connections instead of returning them to the pool.
+        self.pool.putconn(conn, close=conn.closed)
 
     def _insert_batch(self, rows: list, batch_num: int, total_batches: int):
         conn = self._get_conn()
         try:
-            with conn:
-                with conn.cursor() as cur:
-                    execute_values(
-                        cur,
-                        """
-                        INSERT INTO vectors (id, namespace, embedding, metadata)
-                        VALUES %s
-                        ON CONFLICT (id, namespace) DO UPDATE SET
-                            embedding = EXCLUDED.embedding,
-                            metadata = EXCLUDED.metadata
-                        """,
-                        rows,
-                        template="(%s, %s, %s::vector, %s::jsonb)"
-                    )
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO vectors (id, namespace, embedding, metadata)
+                    VALUES %s
+                    ON CONFLICT (id, namespace) DO UPDATE SET
+                        embedding = EXCLUDED.embedding,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    rows,
+                    template="(%s, %s, %s::vector, %s::jsonb)"
+                )
+            conn.commit()
             print(f"[VECTOR]   -> Batch {batch_num}/{total_batches} OK")
+        except Exception:
+            try:
+                if not conn.closed:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     async def upsert_vectors(self, vectors: List[Dict[str, Any]], namespace: str, batch_size: int = 100):
         total = len(vectors)
@@ -66,7 +88,8 @@ class VectorService:
                 )
                 for v in batch
             ]
-            await asyncio.to_thread(self._insert_batch, rows, idx + 1, total_batches)
+            async with self._pool_sem:
+                await asyncio.to_thread(self._insert_batch, rows, idx + 1, total_batches)
 
         await asyncio.gather(*[insert(b, i) for i, b in enumerate(batches)])
 
@@ -108,7 +131,7 @@ class VectorService:
 
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
 
         return [
             {"id": row[0], "metadata": row[1] or {}, "score": float(row[2])}
@@ -140,7 +163,7 @@ class VectorService:
                 )
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
 
         results = []
         for row_id, emb_text, metadata in rows:
@@ -162,7 +185,7 @@ class VectorService:
                 )
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
         return [{"id": r[0], "source_id": r[1]} for r in rows]
 
     def list_documents(self, namespace: str) -> List[Dict[str, Any]]:
@@ -187,7 +210,7 @@ class VectorService:
                 )
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
         return [
             {"source_id": r[0], "title": r[1], "url": r[2], "source_type": r[3], "chunks": r[4]}
             for r in rows
@@ -220,7 +243,7 @@ class VectorService:
                 )
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
 
         results = []
         for source_id, title, url, combined_text in rows:
@@ -240,33 +263,46 @@ class VectorService:
             return
         conn = self._get_conn()
         try:
-            with conn:
-                with conn.cursor() as cur:
-                    from psycopg2.extras import execute_values
-                    execute_values(
-                        cur,
-                        """
-                        UPDATE vectors AS v
-                        SET metadata = v.metadata || u.new_meta::jsonb
-                        FROM (VALUES %s) AS u(vid, ns, new_meta)
-                        WHERE v.id = u.vid AND v.namespace = u.ns
-                        """,
-                        [(u["id"], namespace, json.dumps(u["metadata"])) for u in updates],
-                        template="(%s, %s, %s)"
-                    )
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    UPDATE vectors AS v
+                    SET metadata = v.metadata || u.new_meta::jsonb
+                    FROM (VALUES %s) AS u(vid, ns, new_meta)
+                    WHERE v.id = u.vid AND v.namespace = u.ns
+                    """,
+                    [(u["id"], namespace, json.dumps(u["metadata"])) for u in updates],
+                    template="(%s, %s, %s)"
+                )
+            conn.commit()
+        except Exception:
+            try:
+                if not conn.closed:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     def delete_all(self, namespace: Optional[str] = None):
         conn = self._get_conn()
         try:
-            with conn:
-                with conn.cursor() as cur:
-                    if namespace:
-                        cur.execute("DELETE FROM vectors WHERE namespace = %s", [namespace])
-                        print(f"[VECTOR] Purged namespace '{namespace}'")
-                    else:
-                        cur.execute("DELETE FROM vectors")
-                        print("[VECTOR] Purged all vectors")
+            with conn.cursor() as cur:
+                if namespace:
+                    cur.execute("DELETE FROM vectors WHERE namespace = %s", [namespace])
+                    print(f"[VECTOR] Purged namespace '{namespace}'")
+                else:
+                    cur.execute("DELETE FROM vectors")
+                    print("[VECTOR] Purged all vectors")
+            conn.commit()
+        except Exception:
+            try:
+                if not conn.closed:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)

@@ -73,7 +73,7 @@ class GoogleDriveConnector(BaseConnector):
         fetched = 0
         limit = scope.doc_limit if scope.doc_limit != -1 else float("inf")
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             while fetched < limit:
                 params = {
                     "q": q,

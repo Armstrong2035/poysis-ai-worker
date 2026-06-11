@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import os
+import traceback
 
 # A snapshot job whose updated_at is older than this is considered orphaned.
 JOB_STALE_AFTER_SECONDS = 300
@@ -120,6 +121,7 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
         _jobs[workspace_id] = {"status": "failed", "error": error_msg}
         await db.update_job(job_id, "failed", error=error_msg)
         print(f"[SNAPSHOT ERROR] {error_msg}")
+        traceback.print_exc()
 
 
 @router.post("/discover")
