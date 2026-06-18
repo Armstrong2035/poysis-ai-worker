@@ -623,30 +623,29 @@ class DatabaseService:
             return False
 
     async def get_active_drive_workspaces(self, active_within_hours: int = 48) -> list:
-        """Return [{workspace_id, user_id}] for workspaces with a Drive token and a search in the last N hours."""
+        """Return [{workspace_id, user_id}] for workspaces with a Drive token whose owner logged in recently."""
         if not self.client:
             return []
         try:
             from datetime import datetime, timezone, timedelta
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=active_within_hours)).isoformat()
-            res = (
-                self.client.table("search_logs")
-                .select("workspace_id")
-                .gte("created_at", cutoff)
-                .execute()
-            )
-            active_ids = {row["workspace_id"] for row in res.data}
-            if not active_ids:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=active_within_hours)
+
+            all_users = self.client.auth.admin.list_users()
+            active_user_ids = [
+                u.id for u in all_users
+                if u.last_sign_in_at and u.last_sign_in_at >= cutoff
+            ]
+            if not active_user_ids:
                 return []
 
-            token_res = (
+            res = (
                 self.client.table("consolidation_workspaces")
                 .select("workspace_id, user_id")
-                .in_("workspace_id", list(active_ids))
+                .in_("user_id", active_user_ids)
                 .not_.is_("google_access_token", "null")
                 .execute()
             )
-            return token_res.data or []
+            return res.data or []
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to get active drive workspaces: {e}")
             return []

@@ -24,3 +24,5 @@ hdbscan
 scikit-learn
 numpy
 mcp
+docx2txt
+python-pptx
