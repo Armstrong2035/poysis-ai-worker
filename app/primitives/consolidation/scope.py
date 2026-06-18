@@ -15,6 +15,7 @@ class ScopeConfig(BaseModel):
     google_refresh_token: Optional[str] = None
     cluster_instructions: List[dict] = []
     indexed_files: Dict[str, str] = {}  # source_id -> etag (modifiedTime)
+    nango_sources: List[str] = []       # providers managed via Nango, e.g. ["notion", "slack"]
 
     @field_validator("sources")
     @classmethod

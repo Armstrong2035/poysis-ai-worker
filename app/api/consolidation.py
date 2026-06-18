@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -415,6 +415,63 @@ def _generate_mcp_url(workspace_id: str) -> str:
     """
     mcp_base_url = os.getenv("MCP_SERVER_URL", "https://poysis-ai-worker-production.up.railway.app/mcp").rstrip("/")
     return f"{mcp_base_url}/{workspace_id}"
+
+
+@router.post("/sync")
+async def run_sync(request: Request, background_tasks: BackgroundTasks):
+    """Proactive sync for all recently-active Drive-connected workspaces. Called by cron."""
+    secret = os.getenv("SYNC_SECRET")
+    if not secret or request.headers.get("Authorization") != f"Bearer {secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    workspaces = await db.get_active_drive_workspaces(active_within_hours=48)
+    started, skipped = [], []
+
+    for ws in workspaces:
+        workspace_id = ws["workspace_id"]
+        user_id = ws["user_id"]
+
+        if _jobs.get(workspace_id, {}).get("status") == "running":
+            skipped.append(workspace_id)
+            continue
+
+        latest_job = await db.get_latest_job(workspace_id, job_type="snapshot")
+        if latest_job and latest_job.get("status") == "running":
+            updated_at_raw = latest_job.get("updated_at", "")
+            try:
+                updated_at = datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
+                if (datetime.now(timezone.utc) - updated_at).total_seconds() < JOB_STALE_AFTER_SECONDS:
+                    skipped.append(workspace_id)
+                    continue
+            except (ValueError, AttributeError):
+                pass
+
+        access_token = await get_valid_token(workspace_id, db, user_id)
+        if not access_token:
+            skipped.append(workspace_id)
+            continue
+
+        indexed_files = await db.get_indexed_files(workspace_id)
+        scope = ScopeConfig(
+            workspace_id=workspace_id,
+            sources=["google_drive"],
+            time_window_days=0,
+            doc_limit=10000,
+            google_access_token=access_token,
+            indexed_files=indexed_files,
+        )
+
+        job_id = await db.create_job(workspace_id, user_id, "snapshot")
+        if not job_id:
+            skipped.append(workspace_id)
+            continue
+
+        background_tasks.add_task(_run_snapshot_job, workspace_id, user_id, scope, job_id)
+        started.append(workspace_id)
+        print(f"[SYNC] Started snapshot for workspace {workspace_id}")
+
+    print(f"[SYNC] started={len(started)} skipped={len(skipped)}")
+    return {"started": started, "skipped": skipped}
 
 
 @router.get("/mcp_url/{workspace_id}")

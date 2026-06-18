@@ -8,7 +8,7 @@ from app.primitives.consolidation.scope import ScopeConfig
 
 class RawSourceItem(BaseModel):
     source_id: str
-    source_type: Literal["google_drive", "gmail", "recordings"]
+    source_type: Literal["google_drive", "gmail", "recordings", "notion", "slack", "github", "google_calendar", "google_mail"]
     title: str
     url: str
     etag: str

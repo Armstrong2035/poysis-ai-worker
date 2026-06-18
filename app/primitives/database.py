@@ -622,6 +622,35 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to delete drive connection: {e}")
             return False
 
+    async def get_active_drive_workspaces(self, active_within_hours: int = 48) -> list:
+        """Return [{workspace_id, user_id}] for workspaces with a Drive token and a search in the last N hours."""
+        if not self.client:
+            return []
+        try:
+            from datetime import datetime, timezone, timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=active_within_hours)).isoformat()
+            res = (
+                self.client.table("search_logs")
+                .select("workspace_id")
+                .gte("created_at", cutoff)
+                .execute()
+            )
+            active_ids = {row["workspace_id"] for row in res.data}
+            if not active_ids:
+                return []
+
+            token_res = (
+                self.client.table("consolidation_workspaces")
+                .select("workspace_id, user_id")
+                .in_("workspace_id", list(active_ids))
+                .not_.is_("google_access_token", "null")
+                .execute()
+            )
+            return token_res.data or []
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to get active drive workspaces: {e}")
+            return []
+
     async def mark_drive_connection_synced(self, workspace_id: str) -> bool:
         """Update last_synced_at for the active drive connection in a workspace."""
         if not self.client:
@@ -646,4 +675,64 @@ class DatabaseService:
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to mark drive connection synced: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Nango connections (OAuth for all non-Google sources)
+    # -------------------------------------------------------------------------
+
+    async def save_nango_connection(
+        self,
+        workspace_id: str,
+        user_id: str,
+        provider: str,
+        connection_id: str,
+    ) -> bool:
+        """Upsert a Nango connection record for a workspace + provider pair."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("nango_connections").upsert(
+                {
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "provider": provider,
+                    "connection_id": connection_id,
+                    "enabled": True,
+                },
+                on_conflict="workspace_id,provider",
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save nango connection: {e}")
+            return False
+
+    async def get_nango_connections(self, workspace_id: str) -> list:
+        """Return all enabled Nango connections for a workspace."""
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("nango_connections")
+                .select("id, workspace_id, provider, connection_id, enabled, created_at")
+                .eq("workspace_id", workspace_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to get nango connections: {e}")
+            return []
+
+    async def delete_nango_connection(self, workspace_id: str, provider: str) -> bool:
+        """Remove a Nango connection for a workspace + provider."""
+        if not self.client:
+            return False
+        try:
+            self.client.table("nango_connections").delete().eq(
+                "workspace_id", workspace_id
+            ).eq("provider", provider).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to delete nango connection: {e}")
             return False

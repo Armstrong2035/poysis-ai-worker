@@ -6,6 +6,7 @@ from typing import Optional
 from app.api.security import get_user_id
 from app.primitives.database import DatabaseService
 from app.primitives.consolidation.google_auth import get_valid_token
+from app.primitives.nango import client as nango
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 db = DatabaseService()
@@ -128,3 +129,46 @@ async def list_drive_connections(
     except Exception as e:
         print(f"[SOURCES] Error listing Drive connections: {e}")
         raise HTTPException(status_code=500, detail="Failed to list connections")
+
+
+# ---------------------------------------------------------------------------
+# Nango-managed sources (Slack, Notion, GitHub, etc.)
+# ---------------------------------------------------------------------------
+
+@router.get("/nango")
+async def list_nango_connections(
+    workspace_id: str = Query(...),
+    user_id: str = Depends(get_user_id),
+):
+    """List all Nango-managed source connections for a workspace."""
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    connections = await db.get_nango_connections(workspace_id)
+    return {"connections": connections}
+
+
+@router.delete("/nango/{provider}")
+async def disconnect_nango_source(
+    provider: str,
+    workspace_id: str = Query(...),
+    user_id: str = Depends(get_user_id),
+):
+    """Disconnect a Nango-managed source and remove the token from Nango."""
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Best-effort removal from Nango (don't fail if Nango is unreachable)
+    try:
+        await nango.delete_connection(connection_id=workspace_id, provider=provider)
+    except Exception as e:
+        print(f"[SOURCES] Nango delete_connection failed (continuing): {e}")
+
+    deleted = await db.delete_nango_connection(workspace_id, provider)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    print(f"[SOURCES] Nango disconnected: provider={provider} workspace={workspace_id}")
+    return {"status": "disconnected", "provider": provider, "workspace_id": workspace_id}

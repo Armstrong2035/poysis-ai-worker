@@ -8,6 +8,7 @@ from app.primitives.consolidation.google_auth import (
     fetch_google_email,
 )
 from app.primitives.database import DatabaseService
+from app.primitives.nango import client as nango
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 db = DatabaseService()
@@ -82,3 +83,54 @@ async def google_callback(code: str | None = None, state: str | None = None, err
 
     print(f"[AUTH] Drive connected: workspace={workspace_id} user={user_id} email={google_email}")
     return _client_redirect("drive=connected")
+
+
+# ---------------------------------------------------------------------------
+# Nango OAuth — used for all non-Google sources (Slack, Notion, GitHub, etc.)
+# ---------------------------------------------------------------------------
+
+@router.get("/nango/connect")
+async def nango_connect(workspace_id: str, user_id: str, provider: str):
+    """
+    Step 1 — redirect the user to Nango's hosted OAuth UI for the given provider.
+    connection_id is set to workspace_id so each workspace has one token per provider.
+    """
+    if not workspace_id or not user_id or not provider:
+        return _client_redirect(f"{provider}=error&reason=missing_params")
+
+    url = nango.build_connect_url(provider=provider, connection_id=workspace_id, workspace_id=workspace_id)
+    return RedirectResponse(url)
+
+
+@router.get("/nango/callback")
+async def nango_callback(
+    provider: str | None = None,
+    workspace_id: str | None = None,
+    error: str | None = None,
+    error_desc: str | None = None,
+    user_id: str | None = None,
+):
+    """
+    Step 2 — Nango redirects here after the provider OAuth completes.
+    Saves the connection_id to nango_connections so the snapshot pipeline can use it.
+    """
+    provider = provider or "unknown"
+
+    if error:
+        reason = error_desc or error
+        return _client_redirect(f"{provider}=error&reason={reason}")
+
+    if not workspace_id:
+        return _client_redirect(f"{provider}=error&reason=missing_workspace")
+
+    saved = await db.save_nango_connection(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        provider=provider,
+        connection_id=workspace_id,
+    )
+    if not saved:
+        return _client_redirect(f"{provider}=error&reason=db")
+
+    print(f"[AUTH] Nango connected: provider={provider} workspace={workspace_id}")
+    return _client_redirect(f"{provider}=connected")
