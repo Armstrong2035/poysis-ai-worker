@@ -420,7 +420,7 @@ def _generate_mcp_url(workspace_id: str) -> str:
 @router.post("/sync")
 async def run_sync(request: Request, background_tasks: BackgroundTasks):
     """Proactive sync for all recently-active Drive-connected workspaces. Called by cron."""
-    secret = os.getenv("SYNC_SECRET")
+    secret = os.getenv("CONSOLIDATION_SYNC_SECRET")
     if not secret or request.headers.get("Authorization") != f"Bearer {secret}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
