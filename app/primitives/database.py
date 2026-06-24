@@ -274,7 +274,12 @@ class DatabaseService:
             return
         try:
             rows = [
-                {"workspace_id": workspace_id, "source_id": f["source_id"], "etag": f["etag"]}
+                {
+                    "workspace_id": workspace_id,
+                    "source_id": f["source_id"],
+                    "etag": f["etag"],
+                    "source_type": f.get("source_type", "google_drive"),
+                }
                 for f in files
             ]
             self.client.table("consolidation_indexed_files").upsert(
@@ -734,4 +739,61 @@ class DatabaseService:
             return True
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to delete nango connection: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # YouTube channels (no OAuth — stored by channel_id)
+    # ------------------------------------------------------------------
+
+    async def save_youtube_channel(
+        self,
+        workspace_id: str,
+        user_id: str,
+        channel_id: str,
+        channel_name: str = "",
+    ) -> bool:
+        if not self.client:
+            return False
+        try:
+            self.client.table("youtube_channels").upsert(
+                {
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "enabled": True,
+                },
+                on_conflict="workspace_id,channel_id",
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save YouTube channel: {e}")
+            return False
+
+    async def get_youtube_channels(self, workspace_id: str) -> list:
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("youtube_channels")
+                .select("id, workspace_id, channel_id, channel_name, enabled, created_at")
+                .eq("workspace_id", workspace_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to get YouTube channels: {e}")
+            return []
+
+    async def delete_youtube_channel(self, workspace_id: str, channel_id: str) -> bool:
+        if not self.client:
+            return False
+        try:
+            self.client.table("youtube_channels").delete().eq(
+                "workspace_id", workspace_id
+            ).eq("channel_id", channel_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to delete YouTube channel: {e}")
             return False

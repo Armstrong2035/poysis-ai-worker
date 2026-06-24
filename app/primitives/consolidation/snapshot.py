@@ -9,6 +9,7 @@ from app.primitives.consolidation.connectors.nango_base import NangoConnector
 from app.primitives.consolidation.processors.document import DocumentProcessor
 from app.primitives.consolidation.processors.spreadsheet import SpreadsheetProcessor
 from app.primitives.consolidation.processors.pdf import PDFProcessor
+from app.primitives.consolidation.processors.transcript import TranscriptProcessor
 from app.primitives.consolidation.processors.base import ProcessedChunk
 
 # Registry of Nango-managed connectors. Import lazily to avoid hard failures
@@ -18,6 +19,11 @@ def _nango_connector_map() -> dict:
     return {
         "notion": NotionConnector,
     }
+
+
+def _youtube_connector(channel_ids: List[str]):
+    from app.primitives.consolidation.connectors.youtube import YouTubeConnector
+    return YouTubeConnector(channel_ids=channel_ids)
 
 
 MAX_CHUNKS_PER_DOC = 2000
@@ -41,6 +47,7 @@ class SnapshotRunner:
         self._doc_processor = DocumentProcessor()
         self._sheet_processor = SpreadsheetProcessor()
         self._pdf_processor = PDFProcessor()
+        self._transcript_processor = TranscriptProcessor()
 
     async def discover(self) -> dict:
         total_files = 0
@@ -81,6 +88,12 @@ class SnapshotRunner:
                 total_bytes += item.size_bytes
                 if item.content_type in breakdown:
                     breakdown[item.content_type] += 1
+
+        if self.scope.youtube_channel_ids:
+            yt_connector = _youtube_connector(self.scope.youtube_channel_ids)
+            async for item in yt_connector.list_items(self.scope):
+                total_files += 1
+                breakdown["document"] = breakdown.get("document", 0) + 1
 
         return {
             "workspace_id": self.scope.workspace_id,
@@ -139,7 +152,7 @@ class SnapshotRunner:
                 if item.size_bytes >= SIZE_WARNING_BYTES:
                     print(f"[SnapshotRunner] '{item.title}' ({item.size_bytes / (1024*1024):.1f}MB) exceeds size threshold — orphaning")
                     self.errors.append(f"[{item.source_id}] {item.title}: file too large ({item.size_bytes / (1024*1024):.1f}MB), orphaned")
-                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})
+                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
                     self.docs_orphaned += 1
                     continue
 
@@ -157,12 +170,12 @@ class SnapshotRunner:
                 item, chunks, error = await queue.get()
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
-                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})
+                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
                     continue
                 for chunk in chunks:
                     yield chunk
                 self.docs_processed += 1
-                self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
+                self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
                 print(f"[STEP 2 PARSE ] '{item.title}' queued for embedding ✓")
 
             # Ensure all tasks are awaited even if queue consumed early
@@ -206,14 +219,55 @@ class SnapshotRunner:
                 item, chunks, error = await nango_queue.get()
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
-                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}"})
+                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
                     continue
                 for chunk in chunks:
                     yield chunk
                 self.docs_processed += 1
-                self.completed_files.append({"source_id": item.source_id, "etag": item.etag})
+                self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
 
             await asyncio.gather(*nango_tasks, return_exceptions=True)
+
+        if self.scope.youtube_channel_ids:
+            yt_connector = _youtube_connector(self.scope.youtube_channel_ids)
+            yt_tasks = []
+            yt_queue: asyncio.Queue = asyncio.Queue()
+            yt_sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+            import time as _yt_time
+
+            async def _yt_fetch(item: RawSourceItem, _conn=yt_connector):
+                async with yt_sem:
+                    try:
+                        print(f"[STEP 1 FETCH ] [youtube] '{item.title}'")
+                        t0 = _yt_time.perf_counter()
+                        segments = await _conn.fetch_segments(item)
+                        chunks = await self._transcript_processor.process(item, segments)
+                        elapsed = _yt_time.perf_counter() - t0
+                        print(f"[STEP 2 PARSE ] [youtube] '{item.title}' | {len(chunks)} chunks | {elapsed:.2f}s")
+                        await yt_queue.put((item, chunks, None))
+                    except Exception as e:
+                        print(f"[STEP 1 FETCH ] [youtube] FAILED '{item.title}' | {e}")
+                        await yt_queue.put((item, None, e))
+
+            async for item in yt_connector.list_items(self.scope):
+                indexed_etag = self.scope.indexed_files.get(item.source_id)
+                if indexed_etag and indexed_etag == item.etag:
+                    self.docs_skipped += 1
+                    continue
+                yt_tasks.append(asyncio.create_task(_yt_fetch(item)))
+
+            for _ in range(len(yt_tasks)):
+                item, chunks, error = await yt_queue.get()
+                if error is not None:
+                    self.errors.append(f"[{item.source_id}] {item.title}: {error}")
+                    self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
+                    continue
+                for chunk in chunks:
+                    yield chunk
+                self.docs_processed += 1
+                self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
+
+            await asyncio.gather(*yt_tasks, return_exceptions=True)
 
     async def _process_item(self, item: RawSourceItem, connector: GoogleDriveConnector) -> List[ProcessedChunk]:
         if item.content_type == "document":

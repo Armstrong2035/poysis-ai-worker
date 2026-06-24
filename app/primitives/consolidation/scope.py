@@ -1,10 +1,10 @@
 from typing import Dict, List, Literal, Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class ScopeConfig(BaseModel):
     workspace_id: str
-    sources: List[Literal["google_drive", "gmail", "recordings"]]
+    sources: List[Literal["google_drive", "gmail", "recordings"]] = []
     time_window_days: int = 0           # 0 = all time (beta: maximize coverage)
     doc_limit: int = 500                # -1 = unlimited
     drive_folder_ids: List[str] = []    # [] = all accessible folders
@@ -16,13 +16,13 @@ class ScopeConfig(BaseModel):
     cluster_instructions: List[dict] = []
     indexed_files: Dict[str, str] = {}  # source_id -> etag (modifiedTime)
     nango_sources: List[str] = []       # providers managed via Nango, e.g. ["notion", "slack"]
+    youtube_channel_ids: List[str] = [] # YouTube channel IDs (no OAuth needed)
 
-    @field_validator("sources")
-    @classmethod
-    def sources_not_empty(cls, v):
-        if not v:
+    @model_validator(mode="after")
+    def at_least_one_source(self):
+        if not self.sources and not self.nango_sources and not self.youtube_channel_ids:
             raise ValueError("At least one source must be specified.")
-        return v
+        return self
 
     @field_validator("time_window_days")
     @classmethod

@@ -131,12 +131,18 @@ async def discover(
 ):
     await verify_workspace_ownership(req.workspace_id, user_id)
 
-    access_token = await get_valid_token(req.workspace_id, db, user_id)
-    if not access_token:
-        raise HTTPException(
-            status_code=401,
-            detail="No Google token found for this workspace. Complete OAuth first."
-        )
+    needs_google = "google_drive" in req.sources
+    access_token = None
+    if needs_google:
+        access_token = await get_valid_token(req.workspace_id, db, user_id)
+        if not access_token:
+            raise HTTPException(
+                status_code=401,
+                detail="No Google token found for this workspace. Complete OAuth first."
+            )
+
+    yt_channels = await db.get_youtube_channels(req.workspace_id)
+    youtube_channel_ids = [c["channel_id"] for c in yt_channels]
 
     scope = ScopeConfig(
         workspace_id=req.workspace_id,
@@ -145,6 +151,7 @@ async def discover(
         doc_limit=req.doc_limit,
         drive_folder_ids=req.drive_folder_ids,
         google_access_token=access_token,
+        youtube_channel_ids=youtube_channel_ids,
     )
 
     runner = SnapshotRunner(scope=scope)
@@ -183,14 +190,19 @@ async def run_snapshot(
             raise HTTPException(status_code=409, detail="Snapshot already running for this workspace.")
         await db.update_job(latest_job["id"], "failed", error="orphaned (no heartbeat)")
 
-    access_token = await get_valid_token(workspace_id, db, user_id)
-    if not access_token:
-        raise HTTPException(
-            status_code=401,
-            detail="No Google token found for this workspace. Complete OAuth first."
-        )
+    needs_google = "google_drive" in req.sources
+    access_token = None
+    if needs_google:
+        access_token = await get_valid_token(workspace_id, db, user_id)
+        if not access_token:
+            raise HTTPException(
+                status_code=401,
+                detail="No Google token found for this workspace. Complete OAuth first."
+            )
 
     indexed_files = await db.get_indexed_files(workspace_id)
+    yt_channels = await db.get_youtube_channels(workspace_id)
+    youtube_channel_ids = [c["channel_id"] for c in yt_channels]
 
     scope = ScopeConfig(
         workspace_id=workspace_id,
@@ -201,6 +213,7 @@ async def run_snapshot(
         cluster_instructions=req.cluster_instructions,
         google_access_token=access_token,
         indexed_files=indexed_files,
+        youtube_channel_ids=youtube_channel_ids,
     )
 
     # Create job record

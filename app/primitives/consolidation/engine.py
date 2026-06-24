@@ -23,6 +23,11 @@ class ConsolidationEngine:
     def _namespace(self, workspace_id: str) -> str:
         return f"consolidation_{workspace_id}"
 
+    def _transcript_namespace(self, workspace_id: str) -> str:
+        return f"youtube_{workspace_id}"
+
+    _TRANSCRIPT_SOURCES = {"youtube"}
+
     def _to_documents(self, chunks: List[ProcessedChunk], offset: int) -> List[Document]:
         return [
             Document(
@@ -49,8 +54,10 @@ class ConsolidationEngine:
     ) -> Dict[str, Any]:
         runner = SnapshotRunner(scope=scope)
         namespace = self._namespace(scope.workspace_id)
+        transcript_namespace = self._transcript_namespace(scope.workspace_id)
 
         batch: List[ProcessedChunk] = []
+        transcript_batch: List[ProcessedChunk] = []
         total_chunks = 0
         total_vectors = 0
         batch_number = 0
@@ -65,34 +72,51 @@ class ConsolidationEngine:
                     "docs_orphaned": runner.docs_orphaned,
                 })
 
-        async for chunk in runner.stream():
-            batch.append(chunk)
-            total_chunks += 1
+        async def _flush_doc_batch():
+            nonlocal total_vectors, batch_number
+            if not batch:
+                return
+            documents = self._to_documents(batch, offset=total_chunks - len(batch))
+            indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents)
+            total_vectors += indexed
+            batch_number += 1
+            print(f"[ConsolidationEngine] Doc batch {batch_number} — {indexed} vectors")
+            batch.clear()
 
-            # Fire progress on every doc completion, decoupled from embed batches.
-            # Otherwise small docs can fill a batch slowly and the UI looks frozen.
+        async def _flush_transcript_batch():
+            nonlocal total_vectors
+            if not transcript_batch:
+                return
+            indexed = await self.knowledge.embed_and_store(transcript_namespace, list(transcript_batch))
+            total_vectors += indexed
+            print(f"[ConsolidationEngine] Transcript batch — {indexed} vectors")
+            transcript_batch.clear()
+
+        async for chunk in runner.stream():
+            total_chunks += 1
+            if chunk.source_type in self._TRANSCRIPT_SOURCES:
+                transcript_batch.append(chunk)
+            else:
+                batch.append(chunk)
+
             if runner.docs_processed != last_reported_docs:
                 _emit()
                 last_reported_docs = runner.docs_processed
 
             if len(batch) >= BATCH_SIZE:
-                documents = self._to_documents(batch, offset=total_chunks - len(batch))
-                indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, )
-                total_vectors += indexed
-                batch_number += 1
-                print(f"[ConsolidationEngine] Batch {batch_number} — {indexed} vectors indexed")
+                await _flush_doc_batch()
                 await self._flush_completed_files(scope.workspace_id, runner)
-                batch.clear()
-                _emit()  # vectors_indexed changed
+                _emit()
 
-        # Embed any remaining chunks
-        if batch:
-            documents = self._to_documents(batch, offset=total_chunks - len(batch))
-            indexed = await self.knowledge._run_ingestion_pipeline(namespace, documents, )
-            total_vectors += indexed
-            print(f"[ConsolidationEngine] Final batch — {indexed} vectors indexed")
-            await self._flush_completed_files(scope.workspace_id, runner)
-            _emit()
+            if len(transcript_batch) >= BATCH_SIZE:
+                await _flush_transcript_batch()
+                await self._flush_completed_files(scope.workspace_id, runner)
+                _emit()
+
+        await _flush_doc_batch()
+        await _flush_transcript_batch()
+        await self._flush_completed_files(scope.workspace_id, runner)
+        _emit()
 
         return {
             "workspace_id": scope.workspace_id,

@@ -67,24 +67,7 @@ class KnowledgeEngine:
         doc_count = len(texts)
         print(f"[STEP 3 EMBED ] {doc_count} chunk(s) → text-embedding-3-small | namespace='{notebook_id}'")
         t0 = time.perf_counter()
-        # Sub-batch to stay under OpenAI's 40k TPM limit (~512 tokens/chunk × 50 = 25k max)
-        SUB_BATCH = 200
-        embeddings = []
-        for i in range(0, len(texts), SUB_BATCH):
-            sub = texts[i:i + SUB_BATCH]
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    result = await self.embed_model.aget_text_embedding_batch(sub, show_progress=False)
-                    embeddings.extend(result)
-                    break
-                except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
-                        wait = 30 * (2 ** attempt)
-                        print(f"[STEP 3 EMBED ] Rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(wait)
-                    else:
-                        raise
+        embeddings = await self._embed_batch(texts)
         embed_secs = time.perf_counter() - t0
         for node, embedding in zip(nodes, embeddings):
             node.embedding = embedding
@@ -111,6 +94,88 @@ class KnowledgeEngine:
             await self.vector_service.upsert_vectors(vectors, notebook_id)
             upsert_secs = time.perf_counter() - t1
             print(f"[STEP 4 UPSERT] done — {upsert_secs:.1f}s")
+
+        return len(vectors)
+
+    async def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Embed texts with sub-batching and rate-limit retry."""
+        import asyncio
+        SUB_BATCH = 200
+        embeddings: List[List[float]] = []
+        for i in range(0, len(texts), SUB_BATCH):
+            sub = texts[i:i + SUB_BATCH]
+            for attempt in range(5):
+                try:
+                    result = await self.embed_model.aget_text_embedding_batch(sub, show_progress=False)
+                    embeddings.extend(result)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < 4:
+                        wait = 30 * (2 ** attempt)
+                        print(f"[EMBED] Rate limited — waiting {wait}s (attempt {attempt + 1}/5)")
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+        return embeddings
+
+    async def embed_and_store(
+        self,
+        namespace: str,
+        chunks: list,           # List[ProcessedChunk] — 60s pre-chunks from TranscriptProcessor
+        topic_threshold: float = 0.75,
+    ) -> int:
+        """
+        Two-pass transcript ingestion:
+          Pass 1 — embed 60s pre-chunks, run cosine-similarity segmentation to find topic
+                   boundaries, merge adjacent same-topic pre-chunks into topic chunks.
+          Pass 2 — embed topic chunks (the ones actually stored), upsert to pgvector.
+
+        Skips SentenceSplitter entirely — timestamp boundaries are preserved.
+        """
+        import time, uuid
+
+        if not chunks:
+            return 0
+
+        # --- Pass 1: embed pre-chunks to detect topic boundaries ---
+        print(f"[STEP 3a EMBED] {len(chunks)} pre-chunks → topic segmentation | namespace='{namespace}'")
+        t0 = time.perf_counter()
+        block_embeddings = await self._embed_batch([c.text for c in chunks])
+        print(f"[STEP 3a EMBED] done — {time.perf_counter() - t0:.1f}s")
+
+        topic_groups = _find_topic_groups(chunks, block_embeddings, threshold=topic_threshold)
+        merged = [_merge_transcript_chunks(g) for g in topic_groups]
+        print(f"[TOPIC SEG   ] {len(chunks)} pre-chunks → {len(merged)} topic chunks")
+
+        # --- Pass 2: embed merged topic chunks for storage ---
+        print(f"[STEP 3b EMBED] {len(merged)} topic chunks → storage embeddings | namespace='{namespace}'")
+        t1 = time.perf_counter()
+        topic_embeddings = await self._embed_batch([c.text for c in merged])
+        print(f"[STEP 3b EMBED] done — {time.perf_counter() - t1:.1f}s")
+
+        # --- Upsert ---
+        vectors = []
+        for chunk, embedding in zip(merged, topic_embeddings):
+            vec_id = f"{chunk.source_id}_{chunk.timestamp_start_ms if chunk.timestamp_start_ms is not None else uuid.uuid4().hex}"
+            metadata = {
+                "source_id": chunk.source_id,
+                "source_type": chunk.source_type,
+                "title": chunk.title,
+                "url": chunk.url,
+                "_text": chunk.text,
+                **chunk.extra_metadata,
+            }
+            if chunk.timestamp_start_ms is not None:
+                metadata["timestamp_start_ms"] = chunk.timestamp_start_ms
+            if chunk.timestamp_end_ms is not None:
+                metadata["timestamp_end_ms"] = chunk.timestamp_end_ms
+            vectors.append({"id": vec_id, "values": embedding, "metadata": metadata})
+
+        if vectors:
+            print(f"[STEP 4 UPSERT] {len(vectors)} vectors → namespace='{namespace}'")
+            t2 = time.perf_counter()
+            await self.vector_service.upsert_vectors(vectors, namespace)
+            print(f"[STEP 4 UPSERT] done — {time.perf_counter() - t2:.1f}s")
 
         return len(vectors)
 
@@ -301,3 +366,68 @@ class KnowledgeEngine:
             import traceback
             traceback.print_exc()
             return 0
+
+
+# ---------------------------------------------------------------------------
+# Topic segmentation helpers (used by KnowledgeEngine.embed_and_store)
+# ---------------------------------------------------------------------------
+
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    """Dot product — valid cosine similarity when embeddings are L2-normalised (OpenAI)."""
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _smooth(values: List[float], window: int = 3) -> List[float]:
+    """Simple moving average to reduce noise in the similarity curve."""
+    half = window // 2
+    result = []
+    for i in range(len(values)):
+        lo = max(0, i - half)
+        hi = min(len(values), i + half + 1)
+        result.append(sum(values[lo:hi]) / (hi - lo))
+    return result
+
+
+def _find_topic_groups(chunks: list, embeddings: List[List[float]], threshold: float, smooth_window: int = 3) -> list:
+    """
+    Split chunks into topic groups by finding valleys in the cosine-similarity curve.
+    A valley below `threshold` between two adjacent chunks signals a topic shift.
+    """
+    if len(chunks) <= 1:
+        return [chunks]
+
+    sims = [_cosine_sim(embeddings[i], embeddings[i + 1]) for i in range(len(embeddings) - 1)]
+    smoothed = _smooth(sims, smooth_window)
+
+    groups: list = []
+    current = [chunks[0]]
+    for i, sim in enumerate(smoothed):
+        next_chunk = chunks[i + 1]
+        if sim < threshold:
+            groups.append(current)
+            current = [next_chunk]
+        else:
+            current.append(next_chunk)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _merge_transcript_chunks(group: list) -> Any:
+    """Merge a list of ProcessedChunks into one, spanning the full time range of the group."""
+    from app.primitives.consolidation.processors.base import ProcessedChunk
+    first, last = group[0], group[-1]
+    return ProcessedChunk(
+        text="\n".join(c.text for c in group),
+        source_id=first.source_id,
+        source_type=first.source_type,
+        title=first.title,
+        url=first.url,  # deep-links to the start of this topic
+        timestamp_start_ms=first.timestamp_start_ms,
+        timestamp_end_ms=last.timestamp_end_ms,
+        extra_metadata={
+            **first.extra_metadata,
+            "end_time": last.extra_metadata.get("end_time", ""),
+            "end_seconds": last.extra_metadata.get("start_seconds", 0),
+        },
+    )

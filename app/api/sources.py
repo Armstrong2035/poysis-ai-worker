@@ -149,6 +149,64 @@ async def list_nango_connections(
     return {"connections": connections}
 
 
+@router.post("/youtube/connect")
+async def youtube_connect(
+    workspace_id: str = Form(...),
+    channel_id: str = Form(...),
+    channel_name: str = Form(""),
+    user_id: str = Depends(get_user_id),
+):
+    """Save a YouTube channel to a workspace (no OAuth — public channels only)."""
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    saved = await db.save_youtube_channel(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+    )
+    if not saved:
+        raise HTTPException(status_code=500, detail="Failed to save YouTube channel")
+
+    print(f"[SOURCES] YouTube channel connected: {channel_id} → workspace {workspace_id}")
+    return {"status": "connected", "workspace_id": workspace_id, "channel_id": channel_id}
+
+
+@router.delete("/youtube/{channel_id}")
+async def youtube_disconnect(
+    channel_id: str,
+    workspace_id: str = Query(...),
+    user_id: str = Depends(get_user_id),
+):
+    """Remove a YouTube channel from a workspace."""
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    deleted = await db.delete_youtube_channel(workspace_id, channel_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    print(f"[SOURCES] YouTube channel disconnected: {channel_id} ← workspace {workspace_id}")
+    return {"status": "disconnected", "workspace_id": workspace_id, "channel_id": channel_id}
+
+
+@router.get("/youtube/channels")
+async def list_youtube_channels(
+    workspace_id: str = Query(...),
+    user_id: str = Depends(get_user_id),
+):
+    """List YouTube channels connected to a workspace."""
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    channels = await db.get_youtube_channels(workspace_id)
+    return {"channels": channels}
+
+
 @router.delete("/nango/{provider}")
 async def disconnect_nango_source(
     provider: str,
