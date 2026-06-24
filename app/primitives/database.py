@@ -273,6 +273,11 @@ class DatabaseService:
         if not self.client or not files:
             return
         try:
+            # Deduplicate by source_id — search APIs can return the same ID
+            # across pages; duplicate rows in one upsert batch cause a Postgres error.
+            seen: dict = {}
+            for f in files:
+                seen[f["source_id"]] = f
             rows = [
                 {
                     "workspace_id": workspace_id,
@@ -280,7 +285,7 @@ class DatabaseService:
                     "etag": f["etag"],
                     "source_type": f.get("source_type", "google_drive"),
                 }
-                for f in files
+                for f in seen.values()
             ]
             self.client.table("consolidation_indexed_files").upsert(
                 rows, on_conflict="workspace_id,source_id"

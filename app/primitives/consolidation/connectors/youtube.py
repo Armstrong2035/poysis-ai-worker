@@ -81,7 +81,9 @@ class YouTubeConnector(BaseConnector):
         """Return raw transcript segments: [{start, duration, text}, ...]."""
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
-            return YouTubeTranscriptApi.get_transcript(item.source_id)
+            ytt = YouTubeTranscriptApi()
+            fetched = ytt.fetch(item.source_id)
+            return [{"start": s.start, "duration": s.duration, "text": s.text} for s in fetched]
         except Exception as e:
             raise RuntimeError(f"No captions for video {item.source_id}: {e}")
 
