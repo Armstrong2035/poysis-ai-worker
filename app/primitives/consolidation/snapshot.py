@@ -232,7 +232,7 @@ class SnapshotRunner:
             yt_connector = _youtube_connector(self.scope.youtube_channel_ids)
             yt_tasks = []
             yt_queue: asyncio.Queue = asyncio.Queue()
-            yt_sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+            yt_sem = asyncio.Semaphore(1)  # sequential — YouTube rate-limits concurrent scraping
             import time as _yt_time
 
             async def _yt_fetch(item: RawSourceItem, _conn=yt_connector):
@@ -248,6 +248,8 @@ class SnapshotRunner:
                     except Exception as e:
                         print(f"[STEP 1 FETCH ] [youtube] FAILED '{item.title}' | {e}")
                         await yt_queue.put((item, None, e))
+                    finally:
+                        await asyncio.sleep(3)  # respect YouTube's rate limit
 
             async for item in yt_connector.list_items(self.scope):
                 indexed_etag = self.scope.indexed_files.get(item.source_id)

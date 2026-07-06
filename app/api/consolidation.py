@@ -37,6 +37,20 @@ class SnapshotRequest(BaseModel):
     cluster_instructions: List[dict] = []
 
 
+class TranscriptSegment(BaseModel):
+    start: float
+    duration: float
+    text: str
+
+
+class IngestTranscriptRequest(BaseModel):
+    workspace_id: str
+    video_id: str
+    title: str
+    published_at: str = ""
+    segments: List[TranscriptSegment]
+
+
 async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig, job_id: str):
     """Background job: consolidate and cluster documents."""
     _jobs[workspace_id] = {"status": "running", "vectors_indexed": 0, "docs_processed": 0, "errors": []}
@@ -122,6 +136,54 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
         await db.update_job(job_id, "failed", error=error_msg)
         print(f"[SNAPSHOT ERROR] {error_msg}")
         traceback.print_exc()
+
+
+@router.post("/youtube/ingest_transcript")
+async def ingest_youtube_transcript(
+    req: IngestTranscriptRequest,
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Accept a pre-fetched YouTube transcript (e.g. from a browser script) and
+    run it through the transcript pipeline: topic segmentation → embed → store.
+    """
+    await verify_workspace_ownership(req.workspace_id, user_id)
+
+    from app.primitives.consolidation.connectors.base import RawSourceItem
+    from app.primitives.consolidation.processors.transcript import TranscriptProcessor
+    from app.primitives.knowledge.engine import KnowledgeEngine
+
+    item = RawSourceItem(
+        source_id=req.video_id,
+        source_type="youtube",
+        title=req.title,
+        url=f"https://www.youtube.com/watch?v={req.video_id}",
+        etag=req.published_at or req.video_id,
+        last_modified=datetime.now(timezone.utc),
+        content_type="document",
+        size_bytes=0,
+    )
+
+    segments = [{"start": s.start, "duration": s.duration, "text": s.text} for s in req.segments]
+
+    processor = TranscriptProcessor()
+    chunks = await processor.process(item, segments)
+
+    if not chunks:
+        raise HTTPException(status_code=422, detail="No transcript chunks produced — video may have no usable captions.")
+
+    namespace = f"youtube_{req.workspace_id}"
+    knowledge = KnowledgeEngine()
+    vectors_indexed = await knowledge.embed_and_store(namespace, chunks)
+
+    await db.mark_files_indexed(req.workspace_id, [{
+        "source_id": req.video_id,
+        "etag": req.published_at or req.video_id,
+        "source_type": "youtube",
+    }])
+
+    print(f"[INGEST] youtube/{req.video_id} → {len(chunks)} chunks → {vectors_indexed} vectors")
+    return {"status": "indexed", "video_id": req.video_id, "chunks": len(chunks), "vectors": vectors_indexed}
 
 
 @router.post("/discover")

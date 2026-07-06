@@ -185,9 +185,13 @@ class KnowledgeEngine:
         text: str,
         top_k: int = 10,
         topic_id: Optional[int] = None,
+        source_types: Optional[List[str]] = None,
+        topic_ids: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         query_embedding = await self.embed_model.aget_query_embedding(text)
 
+        # topic_id (singular) maps to the legacy metadata_filter path; topic_ids (plural)
+        # maps to category_id written by the clustering step and is used for playground scoping.
         metadata_filter = {"topic_id": topic_id} if topic_id is not None else None
 
         matches = self.vector_service.query_vectors(
@@ -195,6 +199,8 @@ class KnowledgeEngine:
             namespace=notebook_id,
             top_k=top_k,
             metadata_filter=metadata_filter,
+            source_types=source_types,
+            topic_ids=topic_ids,
         )
 
         results = []
@@ -258,7 +264,14 @@ class KnowledgeEngine:
             "sources": sources
         }
 
-    async def stream_answer(self, notebook_id: str, query: str):
+    async def stream_answer(
+        self,
+        notebook_id: str,
+        query: str,
+        instructions: Optional[str] = None,
+        topic_ids: Optional[List[str]] = None,
+        source_types: Optional[List[str]] = None,
+    ):
         """
         STREAMING INTELLIGENCE LAYER: Yields answer tokens as they arrive from Gemini.
         First token appears in ~1s. Sources are yielded last as a JSON object.
@@ -266,18 +279,32 @@ class KnowledgeEngine:
         """
         import json
 
-        # 1. Retrieve relevant chunks
-        chunks = await self.fetch_raw(notebook_id, query, top_k=3)
+        # 1. Retrieve relevant chunks (scoped if caller provides filters)
+        chunks = await self.fetch_raw(
+            notebook_id,
+            query,
+            top_k=5,
+            topic_ids=topic_ids,
+            source_types=source_types,
+        )
 
         # 2. Build context
-        context_parts = [
-            f"[Source: {c['metadata'].get('source_file', 'unknown')}]\n{c['text']}"
-            for c in chunks
-        ]
+        context_parts = []
+        for c in chunks:
+            meta = c.get("metadata", {})
+            label = meta.get("title") or meta.get("source_file") or "unknown"
+            start_time = meta.get("start_time", "")
+            header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
+            context_parts.append(f"{header}\n{c['text']}")
         context = "\n\n---\n\n".join(context_parts) if context_parts else "No relevant context found."
 
+        system = instructions or (
+            "Answer the following question based on the provided context. "
+            "Be concise and direct. If the context doesn't contain enough information, say so."
+        )
+
         prompt = (
-            "Answer the following question based on the provided context.\n\n"
+            f"{system}\n\n"
             f"Context:\n{context}\n\n"
             f"Question: {query}\n\n"
             "Answer:"
@@ -299,9 +326,14 @@ class KnowledgeEngine:
         # 5. Yield sources as a final structured chunk
         sources = [
             {
-                "file": c["metadata"].get("source_file"),
-                "score": c["score"],
-                "snippet": c["text"][:200] + "..."
+                "title": c["metadata"].get("title") or c["metadata"].get("source_file"),
+                "url": c["metadata"].get("url"),
+                "source_type": c["metadata"].get("source_type"),
+                "source_id": c["metadata"].get("source_id"),
+                "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
+                "start_time": c["metadata"].get("start_time"),
+                "score": round(c["score"], 4),
+                "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
             }
             for c in chunks
         ]

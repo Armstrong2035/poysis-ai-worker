@@ -141,6 +141,9 @@ class AskRequest(BaseModel):
     notebook_id: str
     query: str
     stream: Optional[bool] = True
+    instructions: Optional[str] = None           # system prompt from playground branding
+    allowed_topic_ids: Optional[List[int]] = None
+    allowed_connection_ids: Optional[List[str]] = None
 
 @router.post("/ask")
 async def ask_question(request: AskRequest):
@@ -150,15 +153,19 @@ async def ask_question(request: AskRequest):
     """
     try:
         engine = KnowledgeEngine()
-        
+
         if request.stream:
-            # Streaming path — tokens arrive in ~1s
             return StreamingResponse(
-                engine.stream_answer(request.notebook_id, request.query),
+                engine.stream_answer(
+                    request.notebook_id,
+                    request.query,
+                    instructions=request.instructions,
+                    topic_ids=request.allowed_topic_ids,
+                    source_types=request.allowed_connection_ids,
+                ),
                 media_type="text/event-stream"
             )
         else:
-            # Non-streaming path — full answer returned as JSON
             result = await engine.answer_question(request.notebook_id, request.query)
             return result
 

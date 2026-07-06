@@ -3,8 +3,13 @@
 No OAuth required. Uses:
   - YouTube Data API v3 (YOUTUBE_API_KEY env var) to list videos.
   - youtube-transcript-api to pull captions without credentials.
+
+Only yields videos longer than MIN_DURATION_SECONDS to skip shorts and
+music videos that never carry sermon transcripts.
 """
+import asyncio
 import os
+import re
 from datetime import datetime, timezone
 from typing import AsyncIterator, List
 
@@ -14,6 +19,7 @@ from app.primitives.consolidation.connectors.base import BaseConnector, RawSourc
 from app.primitives.consolidation.scope import ScopeConfig
 
 _YT_API = "https://www.googleapis.com/youtube/v3"
+MIN_DURATION_SECONDS = 2700  # skip anything shorter than 45 minutes
 
 
 class YouTubeConnector(BaseConnector):
@@ -43,17 +49,33 @@ class YouTubeConnector(BaseConnector):
                     if page_token:
                         params["pageToken"] = page_token
 
-                    resp = await client.get(f"{_YT_API}/search", params=params)
-                    resp.raise_for_status()
-                    data = resp.json()
+                    data = await _get_with_retry(client, f"{_YT_API}/search", params)
 
+                    # Collect video IDs and metadata from this page
+                    page_items = []
                     for entry in data.get("items", []):
                         video_id = entry.get("id", {}).get("videoId")
                         if not video_id:
                             continue
                         snippet = entry.get("snippet", {})
-                        title = snippet.get("title", "Untitled")
-                        published_at = snippet.get("publishedAt", "")
+                        page_items.append({
+                            "video_id": video_id,
+                            "title": snippet.get("title", "Untitled"),
+                            "published_at": snippet.get("publishedAt", ""),
+                        })
+
+                    # Batch-fetch durations (1 quota unit per 50 videos)
+                    durations = await _fetch_durations(
+                        client, [p["video_id"] for p in page_items], self.api_key
+                    )
+
+                    for item in page_items:
+                        video_id = item["video_id"]
+                        duration_s = durations.get(video_id, 0)
+                        if duration_s < MIN_DURATION_SECONDS:
+                            continue  # skip shorts and clips
+
+                        published_at = item["published_at"]
                         last_modified = (
                             datetime.fromisoformat(published_at.replace("Z", "+00:00"))
                             if published_at
@@ -62,7 +84,7 @@ class YouTubeConnector(BaseConnector):
                         yield RawSourceItem(
                             source_id=video_id,
                             source_type="youtube",
-                            title=title,
+                            title=item["title"],
                             url=f"https://www.youtube.com/watch?v={video_id}",
                             etag=published_at or video_id,
                             last_modified=last_modified,
@@ -79,13 +101,19 @@ class YouTubeConnector(BaseConnector):
 
     async def fetch_segments(self, item: RawSourceItem) -> List[dict]:
         """Return raw transcript segments: [{start, duration, text}, ...]."""
-        try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-            ytt = YouTubeTranscriptApi()
-            fetched = ytt.fetch(item.source_id)
-            return [{"start": s.start, "duration": s.duration, "text": s.text} for s in fetched]
-        except Exception as e:
-            raise RuntimeError(f"No captions for video {item.source_id}: {e}")
+        from youtube_transcript_api import YouTubeTranscriptApi
+        ytt = YouTubeTranscriptApi()
+        for attempt in range(4):
+            try:
+                fetched = ytt.fetch(item.source_id)
+                return [{"start": s.start, "duration": s.duration, "text": s.text} for s in fetched]
+            except Exception as e:
+                if "429" in str(e) and attempt < 3:
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                    print(f"[YouTube] 429 on '{item.title}' — waiting {wait}s before retry {attempt + 1}/3")
+                    await asyncio.sleep(wait)
+                else:
+                    raise RuntimeError(f"No captions for video {item.source_id}: {e}")
 
     async def fetch_text(self, item: RawSourceItem) -> str:
         """Plain text fallback — no timestamps. Use fetch_segments for timed output."""
@@ -94,3 +122,50 @@ class YouTubeConnector(BaseConnector):
 
     async def fetch_file(self, item: RawSourceItem) -> str:
         raise NotImplementedError("YouTube source does not support binary download")
+
+
+async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, retries: int = 3) -> dict:
+    """GET with exponential backoff on 403/5xx — YouTube search is occasionally flaky."""
+    for attempt in range(retries):
+        resp = await client.get(url, params=params)
+        if resp.status_code in (403, 500, 502, 503) and attempt < retries - 1:
+            wait = 2 ** attempt
+            print(f"[YouTube] {resp.status_code} on attempt {attempt + 1} — retrying in {wait}s")
+            await asyncio.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    resp.raise_for_status()
+    return {}
+
+
+async def _fetch_durations(
+    client: httpx.AsyncClient, video_ids: List[str], api_key: str
+) -> dict:
+    """Return {video_id: duration_seconds} for a batch of video IDs."""
+    if not video_ids:
+        return {}
+    resp = await client.get(
+        f"{_YT_API}/videos",
+        params={
+            "part": "contentDetails",
+            "id": ",".join(video_ids),
+            "key": api_key,
+        },
+    )
+    resp.raise_for_status()
+    result = {}
+    for item in resp.json().get("items", []):
+        vid_id = item["id"]
+        iso = item.get("contentDetails", {}).get("duration", "")
+        result[vid_id] = _parse_iso8601_duration(iso)
+    return result
+
+
+def _parse_iso8601_duration(iso: str) -> int:
+    """Parse ISO 8601 duration string (e.g. PT1H23M45S) to total seconds."""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
+    if not m:
+        return 0
+    h, mins, s = (int(x or 0) for x in m.groups())
+    return h * 3600 + mins * 60 + s

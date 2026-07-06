@@ -99,36 +99,45 @@ class VectorService:
         namespace: str,
         top_k: int = 5,
         metadata_filter: Optional[Dict[str, Any]] = None,
+        source_types: Optional[List[str]] = None,
+        topic_ids: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         limit = max(top_k, _CANDIDATE_CEILING)
         vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
+        # Build WHERE clauses incrementally
+        conditions = ["namespace = %s"]
+        params: List[Any] = [vec_str, namespace]
+
+        if metadata_filter:
+            conditions.append("metadata @> %s::jsonb")
+            params.append(json.dumps(metadata_filter))
+
+        if source_types:
+            conditions.append("metadata->>'source_type' = ANY(%s)")
+            params.append(source_types)
+
+        if topic_ids:
+            # category_id is written as an integer by the clustering step
+            conditions.append("(metadata->>'category_id')::int = ANY(%s)")
+            params.append(topic_ids)
+
+        where = " AND ".join(conditions)
+        params += [vec_str, limit]
+
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
-                if metadata_filter:
-                    cur.execute(
-                        """
-                        SELECT id, metadata, 1 - (embedding <=> %s::vector) AS score
-                        FROM vectors
-                        WHERE namespace = %s AND metadata @> %s::jsonb
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s
-                        """,
-                        [vec_str, namespace, json.dumps(metadata_filter), vec_str, limit]
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT id, metadata, 1 - (embedding <=> %s::vector) AS score
-                        FROM vectors
-                        WHERE namespace = %s
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s
-                        """,
-                        [vec_str, namespace, vec_str, limit]
-                    )
-
+                cur.execute(
+                    f"""
+                    SELECT id, metadata, 1 - (embedding <=> %s::vector) AS score
+                    FROM vectors
+                    WHERE {where}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    params,
+                )
                 rows = cur.fetchall()
         finally:
             self._put_conn(conn)

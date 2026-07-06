@@ -79,9 +79,22 @@ TOOLS: List[Dict[str, Any]] = [
                 },
                 "source_type": {
                     "type": "string",
-                    "description": "Filter by source. Currently only 'google_drive' is populated.",
+                    "description": "Filter by source type, e.g. 'youtube', 'google_drive', 'notion'.",
                 },
             },
+        },
+    },
+    {
+        "name": "list_topics",
+        "description": (
+            "List the AI-generated topic clusters in the user's knowledge base. "
+            "Each topic has a label, document count, semantic summary, and key themes. "
+            "Use this to understand how the knowledge base is organised before retrieving content "
+            "or helping the owner decide which topics to expose in a shared playground."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
         },
     },
 ]
@@ -187,6 +200,42 @@ async def _tool_list_documents(workspace_id: str, args: Dict[str, Any]) -> Dict[
     return _tool_content("\n".join(lines))
 
 
+async def _tool_list_topics(workspace_id: str) -> Dict[str, Any]:
+    topics = await db.get_topics(workspace_id)
+    if not topics:
+        return _tool_content("No topics found. Run consolidation first to generate topic clusters.")
+
+    # Separate top-level and sub-topics for readable output
+    top_level = [t for t in topics if not t.get("parent_topic_id")]
+    sub_topics = [t for t in topics if t.get("parent_topic_id")]
+    sub_by_parent: Dict[int, List] = {}
+    for s in sub_topics:
+        sub_by_parent.setdefault(s["parent_topic_id"], []).append(s)
+
+    lines = [f"{len(top_level)} topic cluster(s) in this knowledge base:\n"]
+    for t in top_level:
+        tid = t["topic_id"]
+        label = t.get("label", "Untitled")
+        count = t.get("doc_count", 0)
+        summary = t.get("semantic_summary") or ""
+        themes = t.get("key_themes") or []
+
+        lines.append(f"• [{tid}] {label}  ({count} docs)")
+        if summary:
+            lines.append(f"  {summary}")
+        if themes:
+            lines.append(f"  Themes: {', '.join(themes)}")
+
+        for s in sub_by_parent.get(tid, []):
+            sid = s["topic_id"]
+            slabel = s.get("label", "Untitled")
+            scount = s.get("doc_count", 0)
+            lines.append(f"    └─ [{sid}] {slabel}  ({scount} docs)")
+        lines.append("")
+
+    return _tool_content("\n".join(lines))
+
+
 async def _dispatch(method: str, params: Dict[str, Any], workspace_id: str) -> Dict[str, Any]:
     if method == "initialize":
         return {
@@ -204,6 +253,8 @@ async def _dispatch(method: str, params: Dict[str, Any], workspace_id: str) -> D
             return await _tool_retrieve(workspace_id, args)
         if name == "list_documents":
             return await _tool_list_documents(workspace_id, args)
+        if name == "list_topics":
+            return await _tool_list_topics(workspace_id)
         raise HTTPException(status_code=400, detail=f"Unknown tool: {name}")
     # Common notifications — ack with no body.
     if method.startswith("notifications/"):
