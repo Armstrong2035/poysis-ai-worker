@@ -33,12 +33,12 @@ def _build_prompt(docs: List[Dict], parent: Optional[str] = None) -> str:
         )
     else:
         context = (
-            'Group them into 6–8 meaningful, specific top-level categories — the kind a person '
+            'Group them into 10–15 meaningful, specific top-level categories — the kind a person '
             'would use to navigate their files. '
             'Good examples: "Bible Study Notes", "Bank Statements", "AI Business Research", "Real Estate", "Meeting Notes", "CRM Contacts". '
             'Prefer broader, well-populated groups over many narrow ones. '
             'Only create a separate category if it has at least 3 documents that genuinely don\'t fit elsewhere. '
-            'Hard cap: 8 categories. Avoid vague categories like "Miscellaneous". '
+            'Hard cap: 15 categories. Avoid vague categories like "Miscellaneous". '
             'Every document must be assigned to exactly one category.'
         )
 
