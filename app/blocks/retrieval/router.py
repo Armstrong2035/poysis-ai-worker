@@ -269,9 +269,13 @@ async def list_documents(
     try:
         await verify_workspace_ownership(workspace_id, user_id)
 
+        # Must match the namespace consolidation actually wrote with (see the
+        # identical note on /search above) — this endpoint was previously
+        # querying namespace=workspace_id directly, which is never populated;
+        # every real chunk lives under "consolidation_{workspace_id}".
         vector_service = VectorService()
         all_docs = vector_service.list_documents_with_snippets(
-            namespace=workspace_id,
+            namespace=f"consolidation_{workspace_id}",
             snippet_words=200,
             topic_id=topic_id
         )

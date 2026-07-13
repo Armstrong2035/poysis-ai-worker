@@ -113,12 +113,17 @@ class VectorService:
             conditions.append("metadata @> %s::jsonb")
             params.append(json.dumps(metadata_filter))
 
-        if source_types:
+        if source_types is not None:
+            # Empty list means "caller is allowed zero connection types" — must
+            # still filter, not fall through to unscoped (see topic_ids below).
             conditions.append("metadata->>'source_type' = ANY(%s)")
             params.append(source_types)
 
-        if topic_ids:
-            # category_id is written as an integer by the clustering step
+        if topic_ids is not None:
+            # category_id is written as an integer by the clustering step.
+            # `is not None` (not truthiness) matters: an empty list is a real
+            # allowlist meaning "no topics permitted" and must still filter —
+            # treating it as "no restriction" would search the whole workspace.
             conditions.append("(metadata->>'category_id')::int = ANY(%s)")
             params.append(topic_ids)
 
@@ -230,16 +235,15 @@ class VectorService:
     ) -> List[Dict[str, Any]]:
         """One row per document: title + first 3 chunks concatenated for richer context.
 
-        topic_id optionally narrows to documents that contributed at least one
-        chunk to that BERTopic cluster (metadata.topic_id, set during
-        clustering — see bertopic_handler.py). `->>` already returns text, so
-        this compares correctly regardless of whether the stored value is a
-        JSON string or number.
+        topic_id optionally narrows to documents whose chunks were tagged with
+        that category during clustering. The clustering step (categorizer.py)
+        writes the assignment as metadata.category_id (an int), not
+        metadata.topic_id — mirrors the cast used in query_vectors.
         """
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
-                topic_filter = "AND metadata->>'topic_id' = %s" if topic_id is not None else ""
+                topic_filter = "AND (metadata->>'category_id')::int = %s::int" if topic_id is not None else ""
                 params = [namespace] + ([topic_id] if topic_id is not None else [])
                 cur.execute(
                     f"""

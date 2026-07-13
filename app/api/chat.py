@@ -67,8 +67,8 @@ async def chat(
             notebook_id=namespace,
             text=request.query,
             top_k=request.top_k * 6,
-            source_types=request.allowed_connection_ids or None,
-            topic_ids=request.allowed_topic_ids or None,
+            source_types=request.allowed_connection_ids,
+            topic_ids=request.allowed_topic_ids,
         )
 
         above_threshold = [c for c in candidates if c.get("score", 0) >= request.min_score]
