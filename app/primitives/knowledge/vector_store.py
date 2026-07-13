@@ -188,6 +188,31 @@ class VectorService:
             results.append({"id": row_id, "embedding": embedding, "metadata": metadata or {}})
         return results
 
+    def fetch_category_assignments(self, namespace: str) -> Dict[str, int]:
+        """source_id -> category_id for every document currently assigned one.
+
+        Used before reclustering to know which documents belong to a locked
+        topic (chunks of the same source_id always share one category_id, so
+        any one chunk's value is representative).
+        """
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT metadata->>'source_id' AS source_id,
+                           MAX((metadata->>'category_id')::int) AS category_id
+                    FROM vectors
+                    WHERE namespace = %s AND metadata->>'category_id' IS NOT NULL
+                    GROUP BY metadata->>'source_id'
+                    """,
+                    [namespace],
+                )
+                rows = cur.fetchall()
+        finally:
+            self._put_conn(conn)
+        return {row[0]: row[1] for row in rows}
+
     def fetch_vector_source_ids(self, namespace: str) -> List[Dict[str, Any]]:
         """Lightweight fetch: vector id + source_id only, no embeddings."""
         conn = self._get_conn()

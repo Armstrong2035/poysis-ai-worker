@@ -262,27 +262,83 @@ Respond with ONLY valid JSON:
         print(f"[Categorizer] Running on {len(docs)} documents...")
         model = self._get_model()
 
-        top_cats = await asyncio.to_thread(_call_gemini, model, docs)
-        if not top_cats:
-            return {"status": "failed", "reason": "top-level categorization returned nothing", "workspace_id": workspace_id}
+        # Topics the owner has locked (topic_overrides.locked = true) must
+        # survive reclustering untouched — exclude their documents from
+        # categorization entirely rather than letting Gemini re-sort them.
+        locked_topic_ids = set(await self.db.get_locked_topic_ids(workspace_id))
+        existing_category_map = await asyncio.to_thread(self.vector_service.fetch_category_assignments, namespace)
+        locked_source_ids = {sid for sid, cid in existing_category_map.items() if cid in locked_topic_ids}
+        docs_for_gemini = [d for d in docs if d["source_id"] not in locked_source_ids]
+
+        if docs_for_gemini:
+            top_cats = await asyncio.to_thread(_call_gemini, model, docs_for_gemini)
+            if not top_cats:
+                return {"status": "failed", "reason": "top-level categorization returned nothing", "workspace_id": workspace_id}
+        else:
+            print(f"[Categorizer] All {len(docs)} document(s) are in locked topics — nothing to recategorize")
+            top_cats = {}
+
+        # Gemini isn't guaranteed to place every document despite the prompt's
+        # instruction to — bucket any it dropped instead of leaving them
+        # assigned to nothing (first cluster) or a stale category_id from a
+        # previous run (recluster), either of which looks like "wrong topic".
+        all_source_ids = {d["source_id"] for d in docs_for_gemini}
+        assigned_ids = {sid for ids in top_cats.values() for sid in ids}
+        missing_ids = all_source_ids - assigned_ids
+        if missing_ids:
+            print(f"[Categorizer] {len(missing_ids)} document(s) not placed by top-level categorization — bucketing into 'Unsorted'")
+            top_cats.setdefault("Unsorted", []).extend(missing_ids)
+
+        # Preserve topic_id across reclusters. cluster_ceilings and
+        # topic_overrides (client-side) key visibility/lock rules off this id
+        # as if it permanently identifies one topic — but it's really just a
+        # counter over whatever order Gemini listed categories in, which
+        # changes every run. A category keeps its old topic_id as long as its
+        # label matches last run's; only a genuinely new label gets a fresh
+        # id that's never been used before (so ceiling/override rows for a
+        # topic that later disappears can't silently get reassigned to an
+        # unrelated new topic that happens to reuse the same number).
+        existing_topics = await self.db.get_topics(workspace_id)
+        existing_top_ids = {
+            t["label"].strip().lower(): t["topic_id"]
+            for t in existing_topics
+            if t.get("parent_topic_id") is None and t["topic_id"] not in locked_topic_ids
+        }
+        existing_sub_ids = {
+            (t["parent_topic_id"], t["label"].strip().lower()): t["topic_id"]
+            for t in existing_topics
+            if t.get("parent_topic_id") is not None and t["topic_id"] not in locked_topic_ids
+        }
+        next_id = max((t["topic_id"] for t in existing_topics), default=-1) + 1
+
+        def _resolve_id(existing_map: Dict[Any, int], key: Any) -> int:
+            nonlocal next_id
+            if key in existing_map:
+                return existing_map[key]
+            assigned = next_id
+            next_id += 1
+            return assigned
 
         topics_data = []
         source_to_cat: Dict[str, Dict] = {}
-        cat_id = 0
 
         for cat_name, source_ids in top_cats.items():
-            top_id = cat_id
-            cat_id += 1
+            top_id = _resolve_id(existing_top_ids, cat_name.strip().lower())
             cat_docs = [d for d in docs if d["source_id"] in set(source_ids)]
 
             if len(source_ids) > SUB_CLUSTER_THRESHOLD:
                 print(f"[Categorizer]   Sub-clustering '{cat_name}' ({len(source_ids)} docs)...")
                 sub_cats = await asyncio.to_thread(_call_gemini, model, cat_docs, parent=cat_name)
 
+                assigned_sub_ids = {sid for ids in sub_cats.values() for sid in ids}
+                missing_sub_ids = set(source_ids) - assigned_sub_ids
+                if missing_sub_ids:
+                    print(f"[Categorizer]   {len(missing_sub_ids)} document(s) not placed by sub-clustering '{cat_name}' — bucketing into 'Other'")
+                    sub_cats.setdefault("Other", []).extend(missing_sub_ids)
+
                 total = 0
                 for sub_name, sub_ids in sub_cats.items():
-                    sub_id = cat_id
-                    cat_id += 1
+                    sub_id = _resolve_id(existing_sub_ids, (top_id, sub_name.strip().lower()))
                     total += len(sub_ids)
                     topics_data.append({
                         "topic_id": sub_id,
@@ -312,14 +368,42 @@ Respond with ONLY valid JSON:
                 for sid in source_ids:
                     source_to_cat[sid] = {"id": top_id, "label": cat_name}
 
+        # Locked topics are carried over exactly as they were — label,
+        # keywords, doc_count, semantic fields, and their documents'
+        # category_id all preserved untouched instead of recomputed.
+        existing_topics_by_id = {t["topic_id"]: t for t in existing_topics}
+        for tid in locked_topic_ids:
+            topic = existing_topics_by_id.get(tid)
+            if not topic:
+                continue
+            topics_data.append({
+                "topic_id": topic["topic_id"],
+                "label": topic["label"],
+                "keywords": topic.get("keywords", []),
+                "doc_count": topic.get("doc_count", 0),
+                "parent_topic_id": topic.get("parent_topic_id"),
+                "semantic_summary": topic.get("semantic_summary"),
+                "key_themes": topic.get("key_themes", []),
+                "suggested_use_cases": topic.get("suggested_use_cases", []),
+            })
+        for sid in locked_source_ids:
+            cid = existing_category_map[sid]
+            topic = existing_topics_by_id.get(cid)
+            if topic:
+                source_to_cat[sid] = {"id": cid, "label": topic["label"]}
+
         # Persist categories (clear previous clustering)
         await self.db.clear_topics(workspace_id)
         await self.db.clear_stories(workspace_id)
 
-        # Run semantic analysis AND story detection in parallel
+        # Run semantic analysis AND story detection in parallel. Locked topics
+        # already carry their semantic fields from the passthrough above —
+        # re-analyzing them would waste calls and could drift their summary
+        # even though their documents didn't change.
+        new_topics_data = [t for t in topics_data if t["topic_id"] not in locked_topic_ids]
         print(f"[Categorizer] Analyzing semantic content and detecting stories...")
         semantic_task = asyncio.create_task(
-            self._analyze_semantic_content(docs, topics_data, source_to_cat, model)
+            self._analyze_semantic_content(docs, new_topics_data, source_to_cat, model)
         )
         stories_task = asyncio.create_task(
             self._detect_stories(topics_data, model)
@@ -329,7 +413,7 @@ Respond with ONLY valid JSON:
         stories_data = await stories_task
 
         # Enrich topics with semantic analysis
-        for topic in topics_data:
+        for topic in new_topics_data:
             if topic["topic_id"] in semantic_data:
                 topic.update(semantic_data[topic["topic_id"]])
 

@@ -379,6 +379,30 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to clear stories: {e}")
 
+    async def get_locked_topic_ids(self, workspace_id: str) -> list:
+        """Topic ids the owner has locked (topic_overrides.locked = true) —
+        the clustering step must preserve these as-is, not recategorize them."""
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("topic_overrides")
+                .select("topic_id")
+                .eq("workspace_id", workspace_id)
+                .eq("locked", True)
+                .execute()
+            )
+            ids = []
+            for row in res.data:
+                try:
+                    ids.append(int(row["topic_id"]))
+                except (TypeError, ValueError):
+                    continue
+            return ids
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch locked topic ids: {e}")
+            return []
+
     async def get_topics(self, workspace_id: str) -> list:
         """Fetch all topics for a workspace."""
         if not self.client:
