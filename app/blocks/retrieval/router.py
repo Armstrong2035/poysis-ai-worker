@@ -249,6 +249,7 @@ async def list_documents(
     workspace_id: str,
     search: Optional[str] = None,
     source_type: Optional[str] = None,
+    topic_id: Optional[str] = None,
     user_id: str = Depends(get_user_id)
 ):
     """
@@ -259,8 +260,11 @@ async def list_documents(
     - workspace_id: required
     - search: optional, filter by document title (case-insensitive)
     - source_type: optional, filter by source (e.g., "google_drive", "notion")
+    - topic_id: optional, narrow to documents in a specific BERTopic cluster
 
-    Used by: MCP clients, Claude, ChatGPT, etc.
+    Used by: MCP clients, Claude, ChatGPT, etc. Also backs cluster-level
+    "which documents are in here" browsing in the client (Knowledge Map /
+    Canvas), via topic_id.
     """
     try:
         await verify_workspace_ownership(workspace_id, user_id)
@@ -268,7 +272,8 @@ async def list_documents(
         vector_service = VectorService()
         all_docs = vector_service.list_documents_with_snippets(
             namespace=workspace_id,
-            snippet_words=200
+            snippet_words=200,
+            topic_id=topic_id
         )
 
         # Filter by search term (case-insensitive)

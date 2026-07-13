@@ -225,13 +225,24 @@ class VectorService:
             for r in rows
         ]
 
-    def list_documents_with_snippets(self, namespace: str, snippet_words: int = 150) -> List[Dict[str, Any]]:
-        """One row per document: title + first 3 chunks concatenated for richer context."""
+    def list_documents_with_snippets(
+        self, namespace: str, snippet_words: int = 150, topic_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """One row per document: title + first 3 chunks concatenated for richer context.
+
+        topic_id optionally narrows to documents that contributed at least one
+        chunk to that BERTopic cluster (metadata.topic_id, set during
+        clustering — see bertopic_handler.py). `->>` already returns text, so
+        this compares correctly regardless of whether the stored value is a
+        JSON string or number.
+        """
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
+                topic_filter = "AND metadata->>'topic_id' = %s" if topic_id is not None else ""
+                params = [namespace] + ([topic_id] if topic_id is not None else [])
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         metadata->>'source_id'                          AS source_id,
                         MAX(metadata->>'title')                         AS title,
@@ -244,11 +255,12 @@ class VectorService:
                             ) AS rn
                         FROM vectors
                         WHERE namespace = %s
+                        {topic_filter}
                     ) sub
                     WHERE rn <= 3
                     GROUP BY metadata->>'source_id'
                     """,
-                    [namespace],
+                    params,
                 )
                 rows = cur.fetchall()
         finally:
