@@ -109,7 +109,7 @@ async def chat(
             )
 
             llm = GoogleGenAI(
-                model=request.model or "gemini-2.0-flash",
+                model=request.model or "gemini-3.5-flash",
                 api_key=os.getenv("GEMINI_API_KEY"),
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
