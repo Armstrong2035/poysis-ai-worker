@@ -1,5 +1,6 @@
 """Google Drive and other sources integration."""
 from fastapi import APIRouter, HTTPException, Depends, Form, Query
+import httpx
 import os
 from typing import Optional
 
@@ -152,26 +153,43 @@ async def list_nango_connections(
 @router.post("/youtube/connect")
 async def youtube_connect(
     workspace_id: str = Form(...),
-    channel_id: str = Form(...),
+    channel_url: str = Form(...),
     channel_name: str = Form(""),
     user_id: str = Depends(get_user_id),
 ):
-    """Save a YouTube channel to a workspace (no OAuth — public channels only)."""
+    """Save a YouTube channel to a workspace (no OAuth — public channels only).
+
+    channel_url accepts a raw channel ID, a youtube.com URL (/channel/, /@handle,
+    /c/, /user/), or a bare @handle — resolved server-side to the actual channel ID.
+    """
     workspace = await db.get_workspace(workspace_id)
     if not workspace or workspace.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    api_key = os.environ.get("YOUTUBE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="YouTube integration is not configured")
+
+    from app.primitives.consolidation.connectors.youtube import resolve_channel
+    try:
+        channel_id, resolved_title = await resolve_channel(channel_url, api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"YouTube API error while resolving channel: {e}")
+
+    resolved_name = channel_name or resolved_title
     saved = await db.save_youtube_channel(
         workspace_id=workspace_id,
         user_id=user_id,
         channel_id=channel_id,
-        channel_name=channel_name,
+        channel_name=resolved_name,
     )
     if not saved:
         raise HTTPException(status_code=500, detail="Failed to save YouTube channel")
 
-    print(f"[SOURCES] YouTube channel connected: {channel_id} → workspace {workspace_id}")
-    return {"status": "connected", "workspace_id": workspace_id, "channel_id": channel_id}
+    print(f"[SOURCES] YouTube channel connected: {channel_id} ({resolved_name}) → workspace {workspace_id}")
+    return {"status": "connected", "workspace_id": workspace_id, "channel_id": channel_id, "channel_name": resolved_name}
 
 
 @router.delete("/youtube/{channel_id}")

@@ -124,6 +124,43 @@ class YouTubeConnector(BaseConnector):
         raise NotImplementedError("YouTube source does not support binary download")
 
 
+async def resolve_channel(raw_input: str, api_key: str) -> tuple[str, str]:
+    """Resolve a pasted channel URL, @handle, or raw channel ID to (channel_id, title).
+
+    The Data API has no single lookup for every shape a user might paste. Raw IDs and
+    /channel/UC... URLs resolve exactly via `id=`. Everything else (@handle, or the
+    legacy /c/ and /user/ vanity paths) is resolved via `forHandle=`, which only works
+    if the channel's current handle matches the pasted name — legacy /c/ and /user/
+    URLs aren't guaranteed to still match if the channel changed its handle since.
+    """
+    raw_input = raw_input.strip()
+
+    if re.fullmatch(r"UC[\w-]{22}", raw_input):
+        lookup = {"id": raw_input}
+    else:
+        path = raw_input
+        m = re.search(r"youtube\.com/([^?#]+)", raw_input, re.IGNORECASE)
+        if m:
+            path = m.group(1).strip("/")
+        parts = path.split("/")
+
+        if parts[0] == "channel" and len(parts) > 1:
+            lookup = {"id": parts[1]}
+        elif parts[0] in ("c", "user") and len(parts) > 1:
+            lookup = {"forHandle": f"@{parts[1].lstrip('@')}"}
+        else:
+            lookup = {"forHandle": f"@{parts[0].lstrip('@')}"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        data = await _get_with_retry(client, f"{_YT_API}/channels", {**lookup, "part": "snippet", "key": api_key})
+
+    items = data.get("items", [])
+    if not items:
+        raise ValueError(f"Could not find a YouTube channel matching '{raw_input}'")
+
+    return items[0]["id"], items[0]["snippet"]["title"]
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, retries: int = 3) -> dict:
     """GET with exponential backoff on 403/5xx — YouTube search is occasionally flaky."""
     for attempt in range(retries):

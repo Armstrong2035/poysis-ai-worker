@@ -2,72 +2,18 @@ import asyncio
 import json
 import os
 from typing import Dict, Any, List, Optional
+import numpy as np
 import google.generativeai as genai
 
 from app.primitives.database import DatabaseService
 from app.primitives.knowledge.vector_store import VectorService
+from app.primitives.consolidation import embedding_cluster
 
 CATEGORIZER_MODEL = "gemini-3.1-flash-lite-preview"
-SUB_CLUSTER_THRESHOLD = 25
-_GENERIC_TITLES = {"untitled", "sheet1", "sheet2", "document", "copy", "page", "file", "unnamed"}
+MIN_DOCS_FOR_EMBEDDING_CLUSTER = 10
 
 
-def _is_descriptive(title: str) -> bool:
-    if not title or len(title) < 5:
-        return False
-    lower = title.lower().strip()
-    if lower in _GENERIC_TITLES:
-        return False
-    if len(lower) > 20 and all(c in "0123456789abcdef-_" for c in lower):
-        return False
-    return True
-
-
-def _build_prompt(docs: List[Dict], parent: Optional[str] = None) -> str:
-    if parent:
-        context = (
-            f'These documents all belong to the category "{parent}". '
-            'Break them into 3–5 more specific sub-categories. '
-            'Prefer broader sub-groups over many narrow ones — only split out a sub-category '
-            'if it has at least 3 documents that genuinely don\'t fit the others.'
-        )
-    else:
-        context = (
-            'Group them into 10–15 meaningful, specific top-level categories — the kind a person '
-            'would use to navigate their files. '
-            'Good examples: "Bible Study Notes", "Bank Statements", "AI Business Research", "Real Estate", "Meeting Notes", "CRM Contacts". '
-            'Prefer broader, well-populated groups over many narrow ones. '
-            'Only create a separate category if it has at least 3 documents that genuinely don\'t fit elsewhere. '
-            'Hard cap: 15 categories. Avoid vague categories like "Miscellaneous". '
-            'Every document must be assigned to exactly one category.'
-        )
-
-    lines = []
-    for d in docs:
-        sid = d["source_id"]
-        title = d.get("title", "")
-        snippet = d.get("snippet", "")
-        if _is_descriptive(title):
-            preview = " ".join(snippet.split()[:30])
-            lines.append(f'[{sid}] "{title}" — {preview}')
-        else:
-            lines.append(f'[{sid}] (untitled) — {snippet}')
-
-    return f"""You are organizing a personal knowledge base.
-
-{context}
-
-Return ONLY a valid JSON object:
-{{
-  "Category Name": ["source_id_1", "source_id_2", ...],
-  ...
-}}
-
-Documents:
-{chr(10).join(lines)}"""
-
-
-def _parse_response(raw: str) -> Optional[Dict[str, List[str]]]:
+def _parse_response(raw: str) -> Optional[Dict[str, Any]]:
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -77,16 +23,6 @@ def _parse_response(raw: str) -> Optional[Dict[str, List[str]]]:
         return json.loads(raw.strip())
     except json.JSONDecodeError:
         return None
-
-
-def _call_gemini(model, docs: List[Dict], parent: Optional[str] = None) -> Dict[str, List[str]]:
-    prompt = _build_prompt(docs, parent)
-    response = model.generate_content(prompt)
-    result = _parse_response(response.text)
-    if result is None:
-        print(f"[Categorizer] Failed to parse Gemini response — skipping {'sub-' if parent else ''}categorization")
-        return {}
-    return result
 
 
 class CategorizerEngine:
@@ -264,40 +200,21 @@ Respond with ONLY valid JSON:
 
         # Topics the owner has locked (topic_overrides.locked = true) must
         # survive reclustering untouched — exclude their documents from
-        # categorization entirely rather than letting Gemini re-sort them.
+        # clustering entirely rather than letting the recluster re-sort them.
         locked_topic_ids = set(await self.db.get_locked_topic_ids(workspace_id))
         existing_category_map = await asyncio.to_thread(self.vector_service.fetch_category_assignments, namespace)
         locked_source_ids = {sid for sid, cid in existing_category_map.items() if cid in locked_topic_ids}
-        docs_for_gemini = [d for d in docs if d["source_id"] not in locked_source_ids]
-
-        if docs_for_gemini:
-            top_cats = await asyncio.to_thread(_call_gemini, model, docs_for_gemini)
-            if not top_cats:
-                return {"status": "failed", "reason": "top-level categorization returned nothing", "workspace_id": workspace_id}
-        else:
-            print(f"[Categorizer] All {len(docs)} document(s) are in locked topics — nothing to recategorize")
-            top_cats = {}
-
-        # Gemini isn't guaranteed to place every document despite the prompt's
-        # instruction to — bucket any it dropped instead of leaving them
-        # assigned to nothing (first cluster) or a stale category_id from a
-        # previous run (recluster), either of which looks like "wrong topic".
-        all_source_ids = {d["source_id"] for d in docs_for_gemini}
-        assigned_ids = {sid for ids in top_cats.values() for sid in ids}
-        missing_ids = all_source_ids - assigned_ids
-        if missing_ids:
-            print(f"[Categorizer] {len(missing_ids)} document(s) not placed by top-level categorization — bucketing into 'Unsorted'")
-            top_cats.setdefault("Unsorted", []).extend(missing_ids)
+        docs_for_clustering = [d for d in docs if d["source_id"] not in locked_source_ids]
 
         # Preserve topic_id across reclusters. cluster_ceilings and
         # topic_overrides (client-side) key visibility/lock rules off this id
-        # as if it permanently identifies one topic — but it's really just a
-        # counter over whatever order Gemini listed categories in, which
-        # changes every run. A category keeps its old topic_id as long as its
-        # label matches last run's; only a genuinely new label gets a fresh
-        # id that's never been used before (so ceiling/override rows for a
-        # topic that later disappears can't silently get reassigned to an
-        # unrelated new topic that happens to reuse the same number).
+        # as if it permanently identifies one topic — but a naive rebuild
+        # would just be a counter over whatever order categories come out in,
+        # which changes every run. A category keeps its old topic_id as long
+        # as its label matches last run's; only a genuinely new label gets a
+        # fresh id that's never been used before (so ceiling/override rows
+        # for a topic that later disappears can't silently get reassigned to
+        # an unrelated new topic that happens to reuse the same number).
         existing_topics = await self.db.get_topics(workspace_id)
         existing_top_ids = {
             t["label"].strip().lower(): t["topic_id"]
@@ -321,52 +238,102 @@ Respond with ONLY valid JSON:
 
         topics_data = []
         source_to_cat: Dict[str, Dict] = {}
+        # Documents that couldn't be grouped for any reason (too few to
+        # cluster, no embedding available, or a genuine density outlier) land
+        # here instead of being silently dropped or left on a stale id.
+        unsorted_source_ids: List[str] = []
 
-        for cat_name, source_ids in top_cats.items():
-            top_id = _resolve_id(existing_top_ids, cat_name.strip().lower())
-            cat_docs = [d for d in docs if d["source_id"] in set(source_ids)]
+        if len(docs_for_clustering) >= MIN_DOCS_FOR_EMBEDDING_CLUSTER:
+            centroid_rows = await asyncio.to_thread(self.vector_service.fetch_document_centroids, namespace)
+            centroid_by_source = {r["source_id"]: r["centroid"] for r in centroid_rows}
+            clusterable = [d for d in docs_for_clustering if d["source_id"] in centroid_by_source]
+            unsorted_source_ids.extend(
+                d["source_id"] for d in docs_for_clustering if d["source_id"] not in centroid_by_source
+            )
+        else:
+            clusterable = []
+            unsorted_source_ids.extend(d["source_id"] for d in docs_for_clustering)
 
-            if len(source_ids) > SUB_CLUSTER_THRESHOLD:
-                print(f"[Categorizer]   Sub-clustering '{cat_name}' ({len(source_ids)} docs)...")
-                sub_cats = await asyncio.to_thread(_call_gemini, model, cat_docs, parent=cat_name)
+        if len(clusterable) >= MIN_DOCS_FOR_EMBEDDING_CLUSTER:
+            source_ids = [d["source_id"] for d in clusterable]
+            titles = [d.get("title") or sid for d, sid in zip(clusterable, source_ids)]
+            centroids = np.array([centroid_by_source[sid] for sid in source_ids])
 
-                assigned_sub_ids = {sid for ids in sub_cats.values() for sid in ids}
-                missing_sub_ids = set(source_ids) - assigned_sub_ids
-                if missing_sub_ids:
-                    print(f"[Categorizer]   {len(missing_sub_ids)} document(s) not placed by sub-clustering '{cat_name}' — bucketing into 'Other'")
-                    sub_cats.setdefault("Other", []).extend(missing_sub_ids)
+            print(f"[Categorizer] Clustering {len(source_ids)} documents by embedding similarity...")
+            labels, chosen_mcs = await embedding_cluster.pick_best_partition(model, source_ids, titles, centroids)
+            print(f"[Categorizer]   Picked min_cluster_size={chosen_mcs}")
 
-                total = 0
-                for sub_name, sub_ids in sub_cats.items():
-                    sub_id = _resolve_id(existing_sub_ids, (top_id, sub_name.strip().lower()))
-                    total += len(sub_ids)
+            fine_clusters = []
+            for lab in sorted(set(int(l) for l in labels)):
+                member_idxs = [i for i, l in enumerate(labels) if int(l) == lab]
+                if lab == -1:
+                    unsorted_source_ids.extend(source_ids[i] for i in member_idxs)
+                    continue
+                fine_clusters.append({
+                    "key": lab,
+                    "size": len(member_idxs),
+                    "titles": [titles[i] for i in member_idxs],
+                    "source_ids": [source_ids[i] for i in member_idxs],
+                })
+
+            if fine_clusters:
+                print(f"[Categorizer]   {len(fine_clusters)} fine-grained clusters, "
+                      f"{len(unsorted_source_ids)} unplaced so far — merging into parent categories...")
+                merge_result = await embedding_cluster.merge_to_parents(model, fine_clusters)
+                parents = merge_result.get("parents", {}) or {}
+                cluster_labels = merge_result.get("cluster_labels", {}) or {}
+
+                fine_by_key = {c["key"]: c for c in fine_clusters}
+                assigned_keys = set()
+                for parent_label, keys in parents.items():
+                    top_id = _resolve_id(existing_top_ids, parent_label.strip().lower())
+                    total = 0
+                    for raw_key in keys:
+                        key = int(raw_key)
+                        cluster = fine_by_key.get(key)
+                        if not cluster:
+                            continue
+                        assigned_keys.add(key)
+                        sub_label = cluster_labels.get(str(key)) or cluster_labels.get(key) or f"Group {key}"
+                        sub_id = _resolve_id(existing_sub_ids, (top_id, sub_label.strip().lower()))
+                        total += cluster["size"]
+                        topics_data.append({
+                            "topic_id": sub_id,
+                            "label": sub_label,
+                            "keywords": [],
+                            "doc_count": cluster["size"],
+                            "parent_topic_id": top_id,
+                        })
+                        for sid in cluster["source_ids"]:
+                            source_to_cat[sid] = {"id": sub_id, "label": sub_label}
                     topics_data.append({
-                        "topic_id": sub_id,
-                        "label": sub_name,
+                        "topic_id": top_id,
+                        "label": parent_label,
                         "keywords": [],
-                        "doc_count": len(sub_ids),
-                        "parent_topic_id": top_id,
+                        "doc_count": total,
+                        "parent_topic_id": None,
                     })
-                    for sid in sub_ids:
-                        source_to_cat[sid] = {"id": sub_id, "label": sub_name}
 
-                topics_data.append({
-                    "topic_id": top_id,
-                    "label": cat_name,
-                    "keywords": [],
-                    "doc_count": total or len(source_ids),
-                    "parent_topic_id": None,
-                })
-            else:
-                topics_data.append({
-                    "topic_id": top_id,
-                    "label": cat_name,
-                    "keywords": [],
-                    "doc_count": len(source_ids),
-                    "parent_topic_id": None,
-                })
-                for sid in source_ids:
-                    source_to_cat[sid] = {"id": top_id, "label": cat_name}
+                # The merge step is asked to place every fine cluster, but it's
+                # an LLM call — apply the same full-coverage safety net as the
+                # per-document case in case it drops one.
+                unassigned = set(fine_by_key) - assigned_keys
+                if unassigned:
+                    print(f"[Categorizer]   {len(unassigned)} cluster(s) not placed by the merge step — bucketing into 'Unsorted'")
+                    for key in unassigned:
+                        unsorted_source_ids.extend(fine_by_key[key]["source_ids"])
+
+        if unsorted_source_ids:
+            unsorted_id = _resolve_id(existing_top_ids, "unsorted")
+            topics_data.append({
+                "topic_id": unsorted_id,
+                "label": "Unsorted",
+                "keywords": [],
+                "doc_count": len(unsorted_source_ids),
+                "parent_topic_id": None,
+            })
+            for sid in unsorted_source_ids:
+                source_to_cat[sid] = {"id": unsorted_id, "label": "Unsorted"}
 
         # Locked topics are carried over exactly as they were — label,
         # keywords, doc_count, semantic fields, and their documents'

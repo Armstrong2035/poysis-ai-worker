@@ -18,6 +18,8 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = 5
     min_score: Optional[float] = 0.4
     model: Optional[str] = None
+    temperature: Optional[float] = 0.2                  # low by default: grounded QA, not creative writing
+    max_tokens: Optional[int] = None
     instructions: Optional[str] = None                  # system prompt from playground branding
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
     allowed_topic_ids: Optional[List[int]] = None       # topic-level scope: owner-approved category_ids
@@ -53,6 +55,7 @@ async def chat(
     Retrieves from consolidation_{workspace_id} namespace and streams a grounded answer.
     Applies source diversity so results span multiple videos, not just the closest one.
     Response format: raw text tokens followed by \\n\\n__SOURCES__{json}.
+    On failure mid-stream, emits \\n\\n__ERROR__{json} instead of dropping the connection silently.
     """
     await verify_workspace_ownership(request.workspace_id, user_id)
 
@@ -62,64 +65,77 @@ async def chat(
     async def generate():
         from llama_index.llms.google_genai import GoogleGenAI
 
-        # Fetch a wide pool so diversity filtering has candidates from many sources
-        candidates = await engine.fetch_raw(
-            notebook_id=namespace,
-            text=request.query,
-            top_k=request.top_k * 6,
-            source_types=request.allowed_connection_ids,
-            topic_ids=request.allowed_topic_ids,
-        )
+        try:
+            # Fetch a wide pool so diversity filtering has candidates from many sources
+            candidates = await engine.fetch_raw(
+                notebook_id=namespace,
+                text=request.query,
+                top_k=request.top_k * 6,
+                source_types=request.allowed_connection_ids,
+                topic_ids=request.allowed_topic_ids,
+            )
 
-        above_threshold = [c for c in candidates if c.get("score", 0) >= request.min_score]
-        diverse = _diversify(above_threshold, request.top_k)
+            above_threshold = [c for c in candidates if c.get("score", 0) >= request.min_score]
+            # min_score is the floor (guards the "nothing relevant" case below); the gap
+            # detector then trims to the natural relevance cliff within what clears it.
+            gapped = engine.vector_service.detect_score_gap(above_threshold, min_results=request.top_k)
+            diverse = _diversify(gapped, request.top_k)
 
-        if not diverse:
-            yield "I couldn't find relevant information in your knowledge base to answer that question."
-            yield f"\n\n__SOURCES__{json.dumps([])}"
-            return
+            if not diverse:
+                yield "I couldn't find relevant information in your knowledge base to answer that question."
+                yield f"\n\n__SOURCES__{json.dumps([])}"
+                return
 
-        context_parts = []
-        for c in diverse:
-            meta = c.get("metadata", {})
-            label = meta.get("title") or meta.get("source_file") or "unknown"
-            start_time = meta.get("start_time", "")
-            header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
-            context_parts.append(f"{header}\n{c['text']}")
-        context = "\n\n---\n\n".join(context_parts)
+            context_parts = []
+            for c in diverse:
+                meta = c.get("metadata", {})
+                label = meta.get("title") or meta.get("source_file") or "unknown"
+                start_time = meta.get("start_time", "")
+                header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
+                context_parts.append(f"{header}\n{c['text']}")
+            context = "\n\n---\n\n".join(context_parts)
 
-        system = request.instructions or (
-            "Answer the following question based solely on the provided context from the user's "
-            "knowledge base. Be concise and direct. If the context doesn't contain enough "
-            "information, say so."
-        )
+            system = request.instructions or (
+                "Answer the following question based solely on the provided context from the user's "
+                "knowledge base. Be concise and direct. If the context doesn't contain enough "
+                "information, say so."
+            )
 
-        prompt = (
-            f"{system}\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {request.query}\n\n"
-            "Answer:"
-        )
+            prompt = (
+                f"{system}\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question: {request.query}\n\n"
+                "Answer:"
+            )
 
-        llm = GoogleGenAI(model=request.model or "gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY"))
-        streaming_response = await llm.astream_complete(prompt)
-        async for delta in streaming_response:
-            yield delta.delta
+            llm = GoogleGenAI(
+                model=request.model or "gemini-2.0-flash",
+                api_key=os.getenv("GEMINI_API_KEY"),
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            )
+            streaming_response = await llm.astream_complete(prompt)
+            async for delta in streaming_response:
+                yield delta.delta
 
-        sources = [
-            {
-                "title": c["metadata"].get("title"),
-                "url": c["metadata"].get("url"),          # already includes ?t= deep-link
-                "source_type": c["metadata"].get("source_type"),
-                "source_id": c["metadata"].get("source_id"),
-                "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
-                "timestamp_end_ms": c["metadata"].get("timestamp_end_ms"),
-                "start_time": c["metadata"].get("start_time"),
-                "score": round(c["score"], 4),
-                "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
-            }
-            for c in diverse
-        ]
-        yield f"\n\n__SOURCES__{json.dumps(sources)}"
+            sources = [
+                {
+                    "title": c["metadata"].get("title"),
+                    "url": c["metadata"].get("url"),          # already includes ?t= deep-link
+                    "source_type": c["metadata"].get("source_type"),
+                    "source_id": c["metadata"].get("source_id"),
+                    "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
+                    "timestamp_end_ms": c["metadata"].get("timestamp_end_ms"),
+                    "start_time": c["metadata"].get("start_time"),
+                    "score": round(c["score"], 4),
+                    "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
+                }
+                for c in diverse
+            ]
+            yield f"\n\n__SOURCES__{json.dumps(sources)}"
+
+        except Exception as e:
+            print(f"[CHAT] generation failed for workspace={request.workspace_id}: {e}")
+            yield f"\n\n__ERROR__{json.dumps({'message': 'Something went wrong generating a response. Please try again.'})}"
 
     return StreamingResponse(generate(), media_type="text/event-stream")

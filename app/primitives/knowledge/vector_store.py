@@ -188,6 +188,35 @@ class VectorService:
             results.append({"id": row_id, "embedding": embedding, "metadata": metadata or {}})
         return results
 
+    def fetch_document_centroids(self, namespace: str) -> List[Dict[str, Any]]:
+        """One row per document: source_id, title, and a centroid embedding
+        (the average of that document's chunk embeddings, computed server-side
+        via pgvector's AVG() aggregate — pulling every raw chunk embedding over
+        the wire for a large namespace is heavy enough to drop the pooler
+        connection; this keeps the transfer to one row per document).
+        """
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT metadata->>'source_id' AS source_id,
+                           MAX(metadata->>'title') AS title,
+                           AVG(embedding)::text AS centroid
+                    FROM vectors
+                    WHERE namespace = %s
+                    GROUP BY metadata->>'source_id'
+                    """,
+                    [namespace],
+                )
+                rows = cur.fetchall()
+        finally:
+            self._put_conn(conn)
+        return [
+            {"source_id": r[0], "title": r[1], "centroid": json.loads(r[2])}
+            for r in rows if r[2]
+        ]
+
     def fetch_category_assignments(self, namespace: str) -> Dict[str, int]:
         """source_id -> category_id for every document currently assigned one.
 
@@ -268,6 +297,13 @@ class VectorService:
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
+                # Full-namespace calls (no topic_id filter) scan every chunk with a
+                # window function + string_agg — heavy enough on a large workspace
+                # to exceed the pooler's default statement_timeout. Bounded rather
+                # than unlimited: this should still fail loudly within a few
+                # minutes instead of hanging indefinitely if something is
+                # genuinely wrong (e.g. disk I/O throttling on the DB side).
+                cur.execute("SET statement_timeout = '180000'")
                 topic_filter = "AND (metadata->>'category_id')::int = %s::int" if topic_id is not None else ""
                 params = [namespace] + ([topic_id] if topic_id is not None else [])
                 cur.execute(
