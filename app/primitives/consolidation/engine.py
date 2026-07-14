@@ -23,9 +23,6 @@ class ConsolidationEngine:
     def _namespace(self, workspace_id: str) -> str:
         return f"consolidation_{workspace_id}"
 
-    def _transcript_namespace(self, workspace_id: str) -> str:
-        return f"youtube_{workspace_id}"
-
     _TRANSCRIPT_SOURCES = {"youtube"}
 
     def _to_documents(self, chunks: List[ProcessedChunk], offset: int) -> List[Document]:
@@ -54,7 +51,6 @@ class ConsolidationEngine:
     ) -> Dict[str, Any]:
         runner = SnapshotRunner(scope=scope)
         namespace = self._namespace(scope.workspace_id)
-        transcript_namespace = self._transcript_namespace(scope.workspace_id)
 
         batch: List[ProcessedChunk] = []
         transcript_batch: List[ProcessedChunk] = []
@@ -87,7 +83,7 @@ class ConsolidationEngine:
             nonlocal total_vectors
             if not transcript_batch:
                 return
-            indexed = await self.knowledge.embed_and_store(transcript_namespace, list(transcript_batch))
+            indexed = await self.knowledge.embed_and_store(namespace, list(transcript_batch))
             total_vectors += indexed
             print(f"[ConsolidationEngine] Transcript batch — {indexed} vectors")
             transcript_batch.clear()

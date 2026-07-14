@@ -172,7 +172,7 @@ async def ingest_youtube_transcript(
     if not chunks:
         raise HTTPException(status_code=422, detail="No transcript chunks produced — video may have no usable captions.")
 
-    namespace = f"youtube_{req.workspace_id}"
+    namespace = f"consolidation_{req.workspace_id}"
     knowledge = KnowledgeEngine()
     vectors_indexed = await knowledge.embed_and_store(namespace, chunks)
 
