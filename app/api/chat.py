@@ -11,6 +11,10 @@ from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+# If the primary model (below) is down, rate-limited, or otherwise unavailable, OpenRouter
+# retries these in order before failing the request.
+_FALLBACK_MODELS = ["deepseek/deepseek-v4-flash"]
+
 
 class ChatRequest(BaseModel):
     workspace_id: str
@@ -19,7 +23,7 @@ class ChatRequest(BaseModel):
     min_score: Optional[float] = 0.4
     model: Optional[str] = None
     temperature: Optional[float] = 0.2                  # low by default: grounded QA, not creative writing
-    max_tokens: Optional[int] = None
+    max_tokens: Optional[int] = 2048               # OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
     instructions: Optional[str] = None                  # system prompt from playground branding
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
     allowed_topic_ids: Optional[List[int]] = None       # topic-level scope: owner-approved category_ids
@@ -63,7 +67,7 @@ async def chat(
     namespace = f"consolidation_{request.workspace_id}"
 
     async def generate():
-        from llama_index.llms.google_genai import GoogleGenAI
+        from llama_index.llms.openai_like import OpenAILike
 
         try:
             # Fetch a wide pool so diversity filtering has candidates from many sources
@@ -108,11 +112,14 @@ async def chat(
                 "Answer:"
             )
 
-            llm = GoogleGenAI(
-                model=request.model or "gemini-3.5-flash",
-                api_key=os.getenv("GEMINI_API_KEY"),
+            llm = OpenAILike(
+                model=request.model or "google/gemini-3.5-flash",
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+                api_base="https://openrouter.ai/api/v1",
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
+                is_chat_model=True,
+                additional_kwargs={"extra_body": {"models": _FALLBACK_MODELS}},
             )
             streaming_response = await llm.astream_complete(prompt)
             async for delta in streaming_response:
