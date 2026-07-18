@@ -8,7 +8,6 @@ from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core.readers import SimpleDirectoryReader
 from llama_parse import LlamaParse
 
@@ -214,130 +213,6 @@ class KnowledgeEngine:
             })
 
         return results
-
-    async def answer_question(self, notebook_id: str, query: str) -> Dict[str, Any]:
-        """
-        THE INTELLIGENCE LAYER: Answers a direct question by synthesizing
-        information from the relevant document chunks.
-        """
-        # 1. Retrieve relevant chunks
-        chunks = await self.fetch_raw(notebook_id, query, top_k=3)
-
-        if not chunks:
-            return {"answer": "No relevant information found in this notebook.", "sources": []}
-
-        # 2. Build context
-        context_parts = [
-            f"[Source: {c['metadata'].get('source_file', 'unknown')}]\n{c['text']}"
-            for c in chunks
-        ]
-        context = "\n\n---\n\n".join(context_parts)
-
-        prompt = (
-            "Answer the following question based on the provided context. "
-            "If the context does not contain enough information, say so.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {query}\n\n"
-            "Answer:"
-        )
-
-        # 3. Call Gemini
-        llm = GoogleGenAI(
-            model="gemini-2.0-flash",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
-
-        print(f"[KnowledgeEngine] Reasoning across notebook '{notebook_id}' to answer: '{query}'")
-        response = await llm.acomplete(prompt)
-
-        sources = [
-            {
-                "file": c["metadata"].get("source_file"),
-                "score": c["score"],
-                "snippet": c["text"][:200] + "..."
-            }
-            for c in chunks
-        ]
-
-        return {
-            "answer": str(response),
-            "sources": sources
-        }
-
-    async def stream_answer(
-        self,
-        notebook_id: str,
-        query: str,
-        instructions: Optional[str] = None,
-        topic_ids: Optional[List[str]] = None,
-        source_types: Optional[List[str]] = None,
-    ):
-        """
-        STREAMING INTELLIGENCE LAYER: Yields answer tokens as they arrive from Gemini.
-        First token appears in ~1s. Sources are yielded last as a JSON object.
-        Use with FastAPI StreamingResponse.
-        """
-        import json
-
-        # 1. Retrieve relevant chunks (scoped if caller provides filters)
-        chunks = await self.fetch_raw(
-            notebook_id,
-            query,
-            top_k=5,
-            topic_ids=topic_ids,
-            source_types=source_types,
-        )
-
-        # 2. Build context
-        context_parts = []
-        for c in chunks:
-            meta = c.get("metadata", {})
-            label = meta.get("title") or meta.get("source_file") or "unknown"
-            start_time = meta.get("start_time", "")
-            header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
-            context_parts.append(f"{header}\n{c['text']}")
-        context = "\n\n---\n\n".join(context_parts) if context_parts else "No relevant context found."
-
-        system = instructions or (
-            "Answer the following question based on the provided context. "
-            "Be concise and direct. If the context doesn't contain enough information, say so."
-        )
-
-        prompt = (
-            f"{system}\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {query}\n\n"
-            "Answer:"
-        )
-
-        # 3. Setup streaming LLM
-        llm = GoogleGenAI(
-            model="gemini-2.0-flash",
-            api_key=os.getenv("GEMINI_API_KEY")
-        )
-
-        print(f"[KnowledgeEngine] Streaming answer for notebook '{notebook_id}'...")
-
-        # 4. Stream tokens as they arrive
-        streaming_response = await llm.astream_complete(prompt)
-        async for delta in streaming_response:
-            yield delta.delta
-
-        # 5. Yield sources as a final structured chunk
-        sources = [
-            {
-                "title": c["metadata"].get("title") or c["metadata"].get("source_file"),
-                "url": c["metadata"].get("url"),
-                "source_type": c["metadata"].get("source_type"),
-                "source_id": c["metadata"].get("source_id"),
-                "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
-                "start_time": c["metadata"].get("start_time"),
-                "score": round(c["score"], 4),
-                "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
-            }
-            for c in chunks
-        ]
-        yield f"\n\n__SOURCES__{json.dumps(sources)}"
 
     async def ingest_file(self, notebook_id: str, file_path: str) -> int:
         """

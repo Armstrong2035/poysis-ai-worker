@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import os
@@ -12,6 +11,30 @@ from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(tags=["retrieval"])
 
+_CONSOLIDATION_PREFIX = "consolidation_"
+
+
+async def _authorize_notebook(notebook_id: str, user_id: str) -> str:
+    """
+    Authorize a raw-namespace endpoint.
+
+    These endpoints address vectors by namespace (`notebook_id`) rather than by
+    workspace_id, so there's no workspace to hand verify_workspace_ownership
+    directly. Every namespace consolidation writes is `consolidation_{workspace_id}`,
+    so the workspace is derived from that prefix. A notebook_id that doesn't match
+    the convention has no owner to check against and is refused rather than allowed
+    — otherwise an arbitrary string would read or write an unguarded namespace.
+    """
+    if not notebook_id.startswith(_CONSOLIDATION_PREFIX):
+        raise HTTPException(status_code=403, detail="Invalid notebook_id.")
+
+    workspace_id = notebook_id[len(_CONSOLIDATION_PREFIX):]
+    if not workspace_id:
+        raise HTTPException(status_code=403, detail="Invalid notebook_id.")
+    await verify_workspace_ownership(workspace_id, user_id)
+    return workspace_id
+
+
 class SearchRequest(BaseModel):
     query: str
     notebook_id: str
@@ -20,12 +43,18 @@ class SearchRequest(BaseModel):
     topic_id: Optional[int] = None
 
 @router.post("/search")
-async def search_documents(request: SearchRequest):
+async def search_documents(
+    request: SearchRequest,
+    user_id: str = Depends(get_user_id),
+):
     """
     Retrieval Block: Fetches semantically relevant chunks for RAG.
     Policy: Filter by min_score, return top N results, format for consumption.
     Optional topic_id narrows Pinecone search to BERTopic-enriched chunks.
     """
+    # Outside the try: the bare `except Exception` below would turn a 401/403 into a 500.
+    await _authorize_notebook(request.notebook_id, user_id)
+
     try:
         engine = KnowledgeEngine()
         
@@ -65,9 +94,16 @@ class IngestRequest(BaseModel):
     documents: List[Dict[str, Any]]
 
 @router.post("/ingest")
-async def ingest_documents(request: IngestRequest):
+async def ingest_documents(
+    request: IngestRequest,
+    user_id: str = Depends(get_user_id),
+):
     """Endpoint for Next.js to push text chunks into the Knowledge Engine."""
     from app.blocks.retrieval.indexer import IndexerService
+
+    # Outside the try: the bare `except Exception` below would turn a 401/403 into a 500.
+    await _authorize_notebook(request.notebook_id, user_id)
+
     try:
         indexer = IndexerService()
         count = await indexer.ingest_documents(
@@ -84,7 +120,8 @@ SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".txt", ".docx"}
 @router.post("/ingest-file")
 async def ingest_file(
     notebook_id: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_user_id),
 ):
     """
     File Ingestion Endpoint: Accepts a multipart file upload and indexes it
@@ -100,9 +137,9 @@ async def ingest_file(
             detail=f"Unsupported file type '{ext}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
         )
     
-    # 2. Validate notebook_id
-    if not notebook_id:
-        raise HTTPException(status_code=400, detail="notebook_id is required.")
+    # 2. Authorize the target namespace before doing any work (parsing, embedding,
+    #    writing). Also subsumes the empty-notebook_id check — "" fails the prefix test.
+    await _authorize_notebook(notebook_id, user_id)
 
     # 3. Save to a secure temp file (preserving the original extension)
     tmp_path = None
@@ -136,43 +173,6 @@ async def ingest_file(
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
             print(f"[INGEST-FILE] Temp file cleaned up: {tmp_path}")
-
-class AskRequest(BaseModel):
-    notebook_id: str
-    query: str
-    stream: Optional[bool] = True
-    instructions: Optional[str] = None           # system prompt from playground branding
-    allowed_topic_ids: Optional[List[int]] = None
-    allowed_connection_ids: Optional[List[str]] = None
-
-@router.post("/ask")
-async def ask_question(request: AskRequest):
-    """
-    RAG Intelligence Block: Streams a synthesized answer from the documents.
-    Returns a StreamingResponse — the client receives tokens as they arrive.
-    """
-    try:
-        engine = KnowledgeEngine()
-
-        if request.stream:
-            return StreamingResponse(
-                engine.stream_answer(
-                    request.notebook_id,
-                    request.query,
-                    instructions=request.instructions,
-                    topic_ids=request.allowed_topic_ids,
-                    source_types=request.allowed_connection_ids,
-                ),
-                media_type="text/event-stream"
-            )
-        else:
-            result = await engine.answer_question(request.notebook_id, request.query)
-            return result
-
-    except Exception as e:
-        print(f"[ASK ERROR] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 # ============================================================================
 # Workspace-level Knowledge API (for MCP + external clients)

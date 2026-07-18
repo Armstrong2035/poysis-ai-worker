@@ -28,14 +28,57 @@ _DEFAULT_TIER = "quick"
 class ChatRequest(BaseModel):
     workspace_id: str
     query: str
-    top_k: Optional[int] = 5
+    top_k: Optional[int] = 8            # synthesis across sources needs more material than lookup does
     min_score: Optional[float] = 0.4
     model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
-    temperature: Optional[float] = 0.2                  # low by default: grounded QA, not creative writing
+    temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
     max_tokens: Optional[int] = 2048               # OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
     instructions: Optional[str] = None                  # system prompt from playground branding
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
     allowed_topic_ids: Optional[List[int]] = None       # topic-level scope: owner-approved category_ids
+
+
+# Deliberately permits inference across excerpts. An extraction-style prompt
+# ("answer solely from the context, else say so") makes the model refuse any question
+# whose answer isn't stated verbatim — which is most real questions, since chunks are
+# excerpts from longer talks and documents.
+_SYNTHESIS_CONTRACT = (
+    "You are answering from the user's knowledge base. The context below is "
+    "excerpted from longer talks and documents.\n\n"
+    "Synthesize across the excerpts. The answer will rarely be stated outright in "
+    "any single passage — draw out the principles, connect what different sources "
+    "say, and build a coherent response from them. That is the job, not a liberty.\n\n"
+    "Ground every claim in the context. Don't import outside knowledge or invent "
+    "specifics. Where sources differ, say so. Only decline if the context is "
+    "genuinely unrelated to the question — not merely because it lacks a direct "
+    "statement."
+)
+
+
+def _build_system_prompt(instructions: Optional[str]) -> str:
+    """
+    Layer a bot's branding prompt on top of the synthesis contract.
+
+    `instructions` used to REPLACE the system prompt, which meant every bot shipping
+    a persona ("you are a warm guide to X's work") silently dropped the grounding and
+    synthesis rules and reverted to the model's default hedging. Each bot author then
+    had to rediscover the same prompt engineering. The contract is the platform's
+    retrieval behavior, not a default to be overwritten — so persona is appended to it
+    and the contract is restated last, where it binds hardest.
+    """
+    if not instructions or not instructions.strip():
+        return _SYNTHESIS_CONTRACT
+
+    return (
+        f"{_SYNTHESIS_CONTRACT}\n\n"
+        "---\n\n"
+        f"Voice and role for this assistant:\n{instructions.strip()}\n\n"
+        "---\n\n"
+        "The voice and role above govern how you sound and what you focus on. They do "
+        "not relax the grounding rules: stay within the provided context, synthesize "
+        "across it rather than declining for lack of a verbatim answer, and never "
+        "invent specifics to stay in character."
+    )
 
 
 def _diversify(chunks: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
@@ -108,11 +151,7 @@ async def chat(
                 context_parts.append(f"{header}\n{c['text']}")
             context = "\n\n---\n\n".join(context_parts)
 
-            system = request.instructions or (
-                "Answer the following question based solely on the provided context from the user's "
-                "knowledge base. Be concise and direct. If the context doesn't contain enough "
-                "information, say so."
-            )
+            system = _build_system_prompt(request.instructions)
 
             prompt = (
                 f"{system}\n\n"
