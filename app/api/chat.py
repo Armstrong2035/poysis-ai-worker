@@ -15,13 +15,22 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # retries these in order before failing the request.
 _FALLBACK_MODELS = ["deepseek/deepseek-v4-flash"]
 
+# Client sends a tier name, not a raw model ID — keeps model choice out of the
+# client and lets us swap the underlying model per tier without a client release.
+_TIER_MODELS = {
+    "quick": "google/gemini-3.5-flash",
+    "thinking": "anthropic/claude-sonnet-5",
+    "expert": "anthropic/claude-opus-4-8",
+}
+_DEFAULT_TIER = "quick"
+
 
 class ChatRequest(BaseModel):
     workspace_id: str
     query: str
     top_k: Optional[int] = 5
     min_score: Optional[float] = 0.4
-    model: Optional[str] = None
+    model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
     temperature: Optional[float] = 0.2                  # low by default: grounded QA, not creative writing
     max_tokens: Optional[int] = 2048               # OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
     instructions: Optional[str] = None                  # system prompt from playground branding
@@ -113,7 +122,7 @@ async def chat(
             )
 
             llm = OpenAILike(
-                model=request.model or "google/gemini-3.5-flash",
+                model=_TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
                 api_key=os.getenv("OPENROUTER_API_KEY"),
                 api_base="https://openrouter.ai/api/v1",
                 temperature=request.temperature,
