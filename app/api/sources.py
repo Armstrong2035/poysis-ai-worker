@@ -1,5 +1,5 @@
 """Google Drive and other sources integration."""
-from fastapi import APIRouter, HTTPException, Depends, Form, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Form, Query
 import httpx
 import os
 from typing import Optional
@@ -150,17 +150,72 @@ async def list_nango_connections(
     return {"connections": connections}
 
 
+async def _seed_directory_bot(
+    background_tasks: BackgroundTasks,
+    user_id: str,
+    channel_url: str,
+    channel_name: str,
+    min_duration_seconds: int,
+):
+    """Seed-mode branch: connecting a channel to the seeder workspace creates a
+    NEW workspace for that channel rather than adding a source to the seeder.
+
+    Deliberately does not touch the seeder workspace — one bot is one workspace is
+    one channel, and attaching a second channel anywhere blends the two namespaces
+    irreversibly.
+    """
+    from app.primitives.consolidation import seeding
+
+    try:
+        channel_id, resolved_title = await seeding.resolve_and_check(db, channel_url)
+    except seeding.SeedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    name = channel_name or resolved_title
+    try:
+        new_workspace_id = await seeding.create_bot_workspace(
+            db, user_id, channel_id, name, min_duration_seconds=min_duration_seconds
+        )
+    except seeding.SeedError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Ingestion is sequential and rate-limited (~5s/video), far too long to hold the
+    # request open. Progress is observable via /consolidation/snapshot/status/{id}.
+    background_tasks.add_task(
+        seeding.ingest_and_cluster, db, new_workspace_id, channel_id, min_duration_seconds
+    )
+
+    print(f"[SOURCES] Seeded directory bot: {channel_id} ({name}) → NEW workspace {new_workspace_id}")
+    return {
+        "status": "seeding",
+        "mode": "seeded",
+        "workspace_id": new_workspace_id,
+        "channel_id": channel_id,
+        "channel_name": name,
+        "min_duration_seconds": min_duration_seconds,
+        "message": (
+            f"Seeding a new bot for '{name}' in workspace {new_workspace_id}. "
+            "Ingestion runs in the background; it was not added to the seeder workspace."
+        ),
+    }
+
+
 @router.post("/youtube/connect")
 async def youtube_connect(
+    background_tasks: BackgroundTasks,
     workspace_id: str = Form(...),
     channel_url: str = Form(...),
     channel_name: str = Form(""),
+    min_duration_seconds: int = Form(0),
     user_id: str = Depends(get_user_id),
 ):
     """Save a YouTube channel to a workspace (no OAuth — public channels only).
 
     channel_url accepts a raw channel ID, a youtube.com URL (/channel/, /@handle,
     /c/, /user/), or a bare @handle — resolved server-side to the actual channel ID.
+
+    If workspace_id is the configured SEED_WORKSPACE_ID, this seeds a brand-new
+    directory bot instead — see _seed_directory_bot.
     """
     workspace = await db.get_workspace(workspace_id)
     if not workspace or workspace.get("user_id") != user_id:
@@ -169,6 +224,27 @@ async def youtube_connect(
     api_key = os.environ.get("YOUTUBE_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=500, detail="YouTube integration is not configured")
+
+    from app.admin.auth import is_admin, is_seed_workspace
+    from app.primitives.consolidation import seeding
+
+    if is_seed_workspace(workspace_id):
+        # Refuse rather than fall through. Falling through would attach the channel
+        # to the seeder workspace itself, blending it with every other channel added
+        # there — the one irreversible mistake this flow exists to prevent. A
+        # misconfigured POYSIS_ADMIN_USER_IDS must fail loudly, not quietly corrupt.
+        if not is_admin(user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="This workspace seeds directory bots and is admin-only.",
+            )
+        return await _seed_directory_bot(
+            background_tasks,
+            user_id,
+            channel_url,
+            channel_name,
+            min_duration_seconds or seeding.DEFAULT_SEED_MIN_DURATION,
+        )
 
     from app.primitives.consolidation.connectors.youtube import resolve_channel
     try:

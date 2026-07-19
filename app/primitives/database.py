@@ -822,6 +822,27 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to get YouTube channels: {e}")
             return []
 
+    async def find_youtube_channels_for_user(self, user_id: str) -> list:
+        """Every enabled YouTube channel this user owns, across all their workspaces.
+
+        Backs the admin bot list — one row per seeded bot, since seeding enforces
+        one channel per workspace.
+        """
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("youtube_channels")
+                .select("workspace_id, channel_id, channel_name, min_duration_seconds, created_at")
+                .eq("user_id", user_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to list channels for user: {e}")
+            return []
+
     async def find_workspaces_for_youtube_channel(self, channel_id: str) -> list:
         """Workspace ids that already have this channel attached (any owner).
 

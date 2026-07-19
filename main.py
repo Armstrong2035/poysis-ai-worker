@@ -15,6 +15,7 @@ from app.ouroboros.promise_detector import router as ouroboros_router
 from app.api.waitlist import router as waitlist_router
 from app.api.sources import router as sources_router
 from app.api.chat import router as chat_router
+from app.admin.router import router as admin_router
 from app.middleware import LoggingMiddleware, RateLimitMiddleware, InputValidationMiddleware, ErrorHandlingMiddleware
 from dotenv import load_dotenv
 
@@ -80,6 +81,8 @@ app.include_router(ouroboros_router)
 app.include_router(chat_router)
 # Waitlist
 app.include_router(waitlist_router)
+
+app.include_router(admin_router)
 
 if __name__ == "__main__":
     import uvicorn
