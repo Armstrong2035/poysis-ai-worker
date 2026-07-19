@@ -822,6 +822,28 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to get YouTube channels: {e}")
             return []
 
+    async def find_workspaces_for_youtube_channel(self, channel_id: str) -> list:
+        """Workspace ids that already have this channel attached (any owner).
+
+        Used by the seeding script to refuse duplicate bots — re-seeding a channel
+        would spend the same YouTube quota again and put two identical bots in the
+        directory.
+        """
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("youtube_channels")
+                .select("workspace_id")
+                .eq("channel_id", channel_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return [r["workspace_id"] for r in res.data]
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to look up channel workspaces: {e}")
+            return []
+
     async def delete_youtube_channel(self, workspace_id: str, channel_id: str) -> bool:
         if not self.client:
             return False
