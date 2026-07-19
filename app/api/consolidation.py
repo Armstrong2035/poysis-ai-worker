@@ -265,6 +265,13 @@ async def run_snapshot(
     indexed_files = await db.get_indexed_files(workspace_id)
     yt_channels = await db.get_youtube_channels(workspace_id)
     youtube_channel_ids = [c["channel_id"] for c in yt_channels]
+    # Honour the per-channel threshold set at seed time. Without this a seeded bot
+    # falls back to the 45min app default on every sync after the first and stops
+    # ingesting anything new. Lowest wins when a workspace has several channels, so
+    # no channel is filtered harder than it was configured for.
+    yt_min_durations = [
+        c["min_duration_seconds"] for c in yt_channels if c.get("min_duration_seconds")
+    ]
 
     scope = ScopeConfig(
         workspace_id=workspace_id,
@@ -276,6 +283,7 @@ async def run_snapshot(
         google_access_token=access_token,
         indexed_files=indexed_files,
         youtube_channel_ids=youtube_channel_ids,
+        **({"youtube_min_duration_seconds": min(yt_min_durations)} if yt_min_durations else {}),
     )
 
     # Create job record

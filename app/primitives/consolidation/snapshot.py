@@ -21,9 +21,9 @@ def _nango_connector_map() -> dict:
     }
 
 
-def _youtube_connector(channel_ids: List[str]):
+def _youtube_connector(channel_ids: List[str], min_duration_seconds: int):
     from app.primitives.consolidation.connectors.youtube import YouTubeConnector
-    return YouTubeConnector(channel_ids=channel_ids)
+    return YouTubeConnector(channel_ids=channel_ids, min_duration_seconds=min_duration_seconds)
 
 
 MAX_CHUNKS_PER_DOC = 2000
@@ -90,7 +90,9 @@ class SnapshotRunner:
                     breakdown[item.content_type] += 1
 
         if self.scope.youtube_channel_ids:
-            yt_connector = _youtube_connector(self.scope.youtube_channel_ids)
+            yt_connector = _youtube_connector(
+                self.scope.youtube_channel_ids, self.scope.youtube_min_duration_seconds
+            )
             async for item in yt_connector.list_items(self.scope):
                 total_files += 1
                 breakdown["document"] = breakdown.get("document", 0) + 1
@@ -229,7 +231,9 @@ class SnapshotRunner:
             await asyncio.gather(*nango_tasks, return_exceptions=True)
 
         if self.scope.youtube_channel_ids:
-            yt_connector = _youtube_connector(self.scope.youtube_channel_ids)
+            yt_connector = _youtube_connector(
+                self.scope.youtube_channel_ids, self.scope.youtube_min_duration_seconds
+            )
             yt_tasks = []
             yt_queue: asyncio.Queue = asyncio.Queue()
             yt_sem = asyncio.Semaphore(1)  # sequential — YouTube rate-limits concurrent scraping
@@ -251,12 +255,36 @@ class SnapshotRunner:
                     finally:
                         await asyncio.sleep(3)  # respect YouTube's rate limit
 
+            yt_listed = 0
             async for item in yt_connector.list_items(self.scope):
+                yt_listed += 1
                 indexed_etag = self.scope.indexed_files.get(item.source_id)
-                if indexed_etag and indexed_etag == item.etag:
-                    self.docs_skipped += 1
-                    continue
+
+                if indexed_etag:
+                    if indexed_etag == item.etag:
+                        self.docs_skipped += 1
+                        continue
+                    # A video with no captions is orphaned permanently — its etag is
+                    # publishedAt, which never changes, so re-fetching can only fail
+                    # again. Without this the exact-match check above misses the
+                    # "ORPHANED:" prefix and every caption-less video is retried on
+                    # every sync, each costing the 3s throttle plus up to three 429
+                    # backoffs (30/60/120s).
+                    if indexed_etag.startswith("ORPHANED:") and indexed_etag[len("ORPHANED:"):] == item.etag:
+                        self.docs_orphaned += 1
+                        continue
+
                 yt_tasks.append(asyncio.create_task(_yt_fetch(item)))
+
+            # A channel whose uploads are all shorter than the threshold lists fine but
+            # yields nothing, producing an empty bot that reports a clean sync. Say so.
+            if yt_listed == 0 and yt_connector.skipped_short:
+                mins = self.scope.youtube_min_duration_seconds / 60
+                self.errors.append(
+                    f"No videos ingested: all {yt_connector.skipped_short} video(s) on this "
+                    f"channel are shorter than the {mins:.0f}min minimum "
+                    f"(youtube_min_duration_seconds={self.scope.youtube_min_duration_seconds})."
+                )
 
             for _ in range(len(yt_tasks)):
                 item, chunks, error = await yt_queue.get()

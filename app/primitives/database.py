@@ -780,18 +780,25 @@ class DatabaseService:
         user_id: str,
         channel_id: str,
         channel_name: str = "",
+        min_duration_seconds: Optional[int] = None,
     ) -> bool:
         if not self.client:
             return False
         try:
+            record = {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "enabled": True,
+            }
+            # Omitted rather than defaulted, so an upsert from the normal "add a
+            # source" flow can't silently reset a seeded bot's threshold back to
+            # the column default.
+            if min_duration_seconds is not None:
+                record["min_duration_seconds"] = min_duration_seconds
             self.client.table("youtube_channels").upsert(
-                {
-                    "workspace_id": workspace_id,
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "channel_name": channel_name,
-                    "enabled": True,
-                },
+                record,
                 on_conflict="workspace_id,channel_id",
             ).execute()
             return True
@@ -805,7 +812,7 @@ class DatabaseService:
         try:
             res = (
                 self.client.table("youtube_channels")
-                .select("id, workspace_id, channel_id, channel_name, enabled, created_at")
+                .select("id, workspace_id, channel_id, channel_name, enabled, created_at, min_duration_seconds")
                 .eq("workspace_id", workspace_id)
                 .eq("enabled", True)
                 .execute()
