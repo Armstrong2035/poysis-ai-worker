@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import json
 import os
-
 from app.primitives.knowledge.engine import KnowledgeEngine
 from app.api.security import get_user_id, verify_workspace_ownership
 
