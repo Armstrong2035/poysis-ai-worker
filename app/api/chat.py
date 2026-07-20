@@ -353,6 +353,18 @@ async def chat(
             }
             yield f"\n\n__META__{json.dumps(meta)}"
 
+            # Persist the turn as a topic-graph / training event. Fire-and-forget so it
+            # never blocks or breaks the response (log_topic_event swallows its own errors).
+            asyncio.create_task(DatabaseService().log_topic_event({
+                "workspace_id": request.workspace_id,
+                "user_id": user_id,
+                "query": request.query,
+                "topic_ids": category_ids,
+                "themes": themes,
+                "source_ids": list(distinct_sources),
+                "top_score": round(diverse[0]["score"], 4) if diverse else None,
+            }))
+
         except Exception as e:
             print(f"[CHAT] generation failed for workspace={request.workspace_id}: {e}")
             yield f"\n\n__ERROR__{json.dumps({'message': 'Something went wrong generating a response. Please try again.'})}"

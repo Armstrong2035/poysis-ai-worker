@@ -165,6 +165,18 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to log attribution event: {e}")
 
+    async def log_topic_event(self, event_data: Dict[str, Any]):
+        """
+        Append one chat turn to the topic graph / training log: the query and the
+        topics, themes and sources retrieved to answer it. Fire-and-forget — a failure
+        here must never affect the chat response.
+        """
+        if not self.client: return
+        try:
+            self.client.table("topic_query_events").insert(event_data).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to log topic event: {e}")
+
     async def get_dashboard_analytics(self, workspace_id: str, days: int = 30) -> Optional[Dict[str, Any]]:
         """
         Calls the highly-performant Supabase RPC to aggregate all dashboard metrics
