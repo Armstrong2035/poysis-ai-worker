@@ -183,6 +183,29 @@ class VectorService:
         print(f"[VECTOR] Score gap cut: keeping {cut}/{len(matches)} candidates")
         return matches[:cut]
 
+    def count_vectors_by_namespace(self, namespaces: List[str]) -> Dict[str, int]:
+        """{namespace: vector count} for the given namespaces, in one round trip.
+
+        Namespaces with no rows are absent from the result — callers should treat a
+        missing key as 0 (an empty bot).
+        """
+        if not namespaces:
+            return {}
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT namespace, count(*) FROM vectors WHERE namespace = ANY(%s) GROUP BY namespace",
+                    [namespaces],
+                )
+                rows = cur.fetchall()
+            conn.rollback()
+        finally:
+            self._put_conn(conn)
+
+        return {row[0]: int(row[1]) for row in rows}
+
     def fetch_all_vectors(self, namespace: str) -> List[Dict[str, Any]]:
         """Fetch all vectors with embeddings for a namespace (used for clustering)."""
         conn = self._get_conn()

@@ -23,9 +23,14 @@ MIN_DURATION_SECONDS = 2700  # skip anything shorter than 45 minutes
 
 
 class YouTubeConnector(BaseConnector):
-    def __init__(self, channel_ids: List[str]):
+    def __init__(self, channel_ids: List[str], min_duration_seconds: int = MIN_DURATION_SECONDS):
         self.channel_ids = channel_ids
+        self.min_duration_seconds = min_duration_seconds
         self.api_key = os.environ.get("YOUTUBE_API_KEY", "")
+        # Videos dropped for being shorter than the threshold. A channel that lists
+        # videos but yields none is indistinguishable from an empty channel unless
+        # the caller can see this — see SnapshotRunner, which turns it into an error.
+        self.skipped_short = 0
 
     async def list_items(self, scope: ScopeConfig) -> AsyncIterator[RawSourceItem]:
         if not self.api_key:
@@ -72,7 +77,8 @@ class YouTubeConnector(BaseConnector):
                     for item in page_items:
                         video_id = item["video_id"]
                         duration_s = durations.get(video_id, 0)
-                        if duration_s < MIN_DURATION_SECONDS:
+                        if duration_s < self.min_duration_seconds:
+                            self.skipped_short += 1
                             continue  # skip shorts and clips
 
                         published_at = item["published_at"]

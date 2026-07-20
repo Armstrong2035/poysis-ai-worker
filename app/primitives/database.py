@@ -780,18 +780,25 @@ class DatabaseService:
         user_id: str,
         channel_id: str,
         channel_name: str = "",
+        min_duration_seconds: Optional[int] = None,
     ) -> bool:
         if not self.client:
             return False
         try:
+            record = {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "enabled": True,
+            }
+            # Omitted rather than defaulted, so an upsert from the normal "add a
+            # source" flow can't silently reset a seeded bot's threshold back to
+            # the column default.
+            if min_duration_seconds is not None:
+                record["min_duration_seconds"] = min_duration_seconds
             self.client.table("youtube_channels").upsert(
-                {
-                    "workspace_id": workspace_id,
-                    "user_id": user_id,
-                    "channel_id": channel_id,
-                    "channel_name": channel_name,
-                    "enabled": True,
-                },
+                record,
                 on_conflict="workspace_id,channel_id",
             ).execute()
             return True
@@ -805,7 +812,7 @@ class DatabaseService:
         try:
             res = (
                 self.client.table("youtube_channels")
-                .select("id, workspace_id, channel_id, channel_name, enabled, created_at")
+                .select("id, workspace_id, channel_id, channel_name, enabled, created_at, min_duration_seconds")
                 .eq("workspace_id", workspace_id)
                 .eq("enabled", True)
                 .execute()
@@ -813,6 +820,49 @@ class DatabaseService:
             return res.data
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to get YouTube channels: {e}")
+            return []
+
+    async def find_youtube_channels_for_user(self, user_id: str) -> list:
+        """Every enabled YouTube channel this user owns, across all their workspaces.
+
+        Backs the admin bot list — one row per seeded bot, since seeding enforces
+        one channel per workspace.
+        """
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("youtube_channels")
+                .select("workspace_id, channel_id, channel_name, min_duration_seconds, created_at")
+                .eq("user_id", user_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return res.data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to list channels for user: {e}")
+            return []
+
+    async def find_workspaces_for_youtube_channel(self, channel_id: str) -> list:
+        """Workspace ids that already have this channel attached (any owner).
+
+        Used by the seeding script to refuse duplicate bots — re-seeding a channel
+        would spend the same YouTube quota again and put two identical bots in the
+        directory.
+        """
+        if not self.client:
+            return []
+        try:
+            res = (
+                self.client.table("youtube_channels")
+                .select("workspace_id")
+                .eq("channel_id", channel_id)
+                .eq("enabled", True)
+                .execute()
+            )
+            return [r["workspace_id"] for r in res.data]
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to look up channel workspaces: {e}")
             return []
 
     async def delete_youtube_channel(self, workspace_id: str, channel_id: str) -> bool:
