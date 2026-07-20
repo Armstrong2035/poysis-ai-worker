@@ -126,7 +126,7 @@ async def chat(
                 notebook_id=namespace,
                 text=request.query,
                 top_k=request.top_k * 6,
-                source_types=request.allowed_connection_ids,
+                connection_ids=request.allowed_connection_ids,
                 topic_ids=request.allowed_topic_ids,
             )
 

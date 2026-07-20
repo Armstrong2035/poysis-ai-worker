@@ -186,6 +186,7 @@ class KnowledgeEngine:
         topic_id: Optional[int] = None,
         source_types: Optional[List[str]] = None,
         topic_ids: Optional[List[int]] = None,
+        connection_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         query_embedding = await self.embed_model.aget_query_embedding(text)
 
@@ -200,6 +201,7 @@ class KnowledgeEngine:
             metadata_filter=metadata_filter,
             source_types=source_types,
             topic_ids=topic_ids,
+            connection_ids=connection_ids,
         )
 
         results = []
