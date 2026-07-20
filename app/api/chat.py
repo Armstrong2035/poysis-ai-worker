@@ -3,9 +3,12 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import asyncio
 import json
 import os
+import re
 from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.database import DatabaseService
 from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -33,6 +36,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
     max_tokens: Optional[int] = 2048               # OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
     instructions: Optional[str] = None                  # system prompt from playground branding
+    creator_name: Optional[str] = None                  # author of the body of work, for voice ("Across his talks, X…")
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
     allowed_topic_ids: Optional[List[int]] = None       # topic-level scope: owner-approved category_ids
 
@@ -41,20 +45,57 @@ class ChatRequest(BaseModel):
 # ("answer solely from the context, else say so") makes the model refuse any question
 # whose answer isn't stated verbatim — which is most real questions, since chunks are
 # excerpts from longer talks and documents.
-_SYNTHESIS_CONTRACT = (
-    "You are answering from the user's knowledge base. The context below is "
-    "excerpted from longer talks and documents.\n\n"
-    "Synthesize across the excerpts. The answer will rarely be stated outright in "
-    "any single passage — draw out the principles, connect what different sources "
-    "say, and build a coherent response from them. That is the job, not a liberty.\n\n"
-    "Ground every claim in the context. Don't import outside knowledge or invent "
-    "specifics. Where sources differ, say so. Only decline if the context is "
-    "genuinely unrelated to the question — not merely because it lacks a direct "
-    "statement."
-)
+def _clean_creator_name(creator_name: Optional[str]) -> Optional[str]:
+    """
+    The client sends a bot's display label (e.g. "Emmanuel Iren Live Notebook").
+    Strip the app-shell words so the voice never says "… Notebook's point is" — the
+    prompt still tells the model to prefer the person's natural name from the excerpts.
+    """
+    if not creator_name or not creator_name.strip():
+        return None
+    name = creator_name.strip()
+    for suffix in (" Notebook", " Playground", " Bot", " Live", " Official"):
+        while name.lower().endswith(suffix.lower()):
+            name = name[: -len(suffix)].strip()
+    return name or None
 
 
-def _build_system_prompt(instructions: Optional[str]) -> str:
+def _synthesis_contract(creator_name: Optional[str]) -> str:
+    """
+    The platform's retrieval-behavior contract, voiced as a warm *interpreter of a
+    body of work* rather than a search engine. When we know whose work it is, the
+    answer speaks with that person at its center ("a theme he returns to is…") instead
+    of "the documents say" — that framing is what makes a notebook feel like the creator.
+    """
+    who = _clean_creator_name(creator_name)
+    subject = f"{who}'s body of work" if who else "a single creator's body of work"
+    speaker = who or "the creator"
+
+    return (
+        f"You are the interpreter of {subject} — a distinct collection of talks and "
+        "writing, not a general search engine. The context below is excerpted from it.\n\n"
+        "VOICE: warm, direct, and human — like a knowledgeable friend introducing you to "
+        f"{speaker}'s thinking, not an academic abstract. Refer to the creator by their "
+        "natural name as it appears in the excerpts (prefer the plain personal name, e.g. "
+        f"\"{speaker}\", never a product label), or with the pronouns the material makes "
+        "clear. NEVER call this a 'notebook' or repeat a display label — that breaks the "
+        "spell. When it fits, open with the single central idea the material keeps returning "
+        "to, then let the rest flow from it.\n\n"
+        f"Put {speaker} at the center: 'He teaches…', '{speaker} keeps returning to…', "
+        "'Across these teachings…' — not 'the documents say' or 'the context mentions.' "
+        "Synthesize across the excerpts: draw out the recurring principles, connect what "
+        "different passages say, and build one coherent view. The answer is rarely stated "
+        "outright in a single passage — that synthesis is the job, not a liberty.\n\n"
+        "Ground every claim in the context. Don't import outside knowledge or invent "
+        "specifics — that includes how MUCH was said: never fabricate quantities like "
+        "'dozens of sermons.' Speak to what's actually in the excerpts. Refer to sources "
+        "by their titles when it helps the reader place an idea. Where sources differ, "
+        "say so. Only decline if the context is genuinely unrelated to the question — not "
+        "merely because it lacks a verbatim statement."
+    )
+
+
+def _build_system_prompt(instructions: Optional[str], creator_name: Optional[str] = None) -> str:
     """
     Layer a bot's branding prompt on top of the synthesis contract.
 
@@ -65,11 +106,12 @@ def _build_system_prompt(instructions: Optional[str]) -> str:
     retrieval behavior, not a default to be overwritten — so persona is appended to it
     and the contract is restated last, where it binds hardest.
     """
+    contract = _synthesis_contract(creator_name)
     if not instructions or not instructions.strip():
-        return _SYNTHESIS_CONTRACT
+        return contract
 
     return (
-        f"{_SYNTHESIS_CONTRACT}\n\n"
+        f"{contract}\n\n"
         "---\n\n"
         f"Voice and role for this assistant:\n{instructions.strip()}\n\n"
         "---\n\n"
@@ -100,6 +142,93 @@ def _diversify(chunks: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]
     return result
 
 
+async def _collect_themes(category_ids: List[int], workspace_id: str, limit: int = 6) -> List[str]:
+    """
+    Recurring themes for the excerpts that informed the answer — the `key_themes` of the
+    clusters they belong to. This leverages the consolidation clustering: it tells the
+    reader what this creator connects to their question. Ordered by the excerpts' relevance
+    (category_ids arrive most-relevant-first). Non-fatal: returns [] on any failure.
+    """
+    if not category_ids:
+        return []
+    try:
+        topics = await DatabaseService().get_topics(workspace_id)
+    except Exception:
+        return []
+    by_id = {t.get("topic_id"): t for t in topics}
+    themes: List[str] = []
+    for cid in category_ids:
+        topic = by_id.get(cid)
+        if not topic:
+            continue
+        for theme in (topic.get("key_themes") or []):
+            if theme and theme not in themes:
+                themes.append(theme)
+    return themes[:limit]
+
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _quote_grounded(quote: str, chunks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Return the chunk a quote is drawn from if its words substantially appear there, else
+    None. Guards against a fabricated "quote" the excerpts never actually contained — the
+    model may lightly clean caption noise, but the words must still come from a real source.
+    """
+    q_words = _WORD_RE.findall(quote.lower())
+    if len(q_words) < 4:
+        return None
+    q_set = set(q_words)
+    best, best_ratio = None, 0.0
+    for c in chunks:
+        c_set = set(_WORD_RE.findall((c.get("text") or "").lower()))
+        if not c_set:
+            continue
+        ratio = len(q_set & c_set) / len(q_set)
+        if ratio > best_ratio:
+            best, best_ratio = c, ratio
+    return best if best_ratio >= 0.6 else None
+
+
+async def _extract_key_quote(diverse: List[Dict[str, Any]], llm) -> Optional[Dict[str, Any]]:
+    """
+    Pick the single most memorable line from the excerpts, lightly cleaned, and only return
+    it if it's grounded in one of them. Runs as its own cheap call so its latency can hide
+    behind the main answer's streaming. Non-fatal: returns None on any failure.
+    """
+    try:
+        joined = "\n\n".join(f"[{i}] {c.get('text', '')}" for i, c in enumerate(diverse))
+        prompt = (
+            "From the excerpts below, choose the SINGLE most memorable, quotable sentence — "
+            "the one line that best captures a central idea. Lightly clean caption artifacts "
+            "and punctuation for readability, but keep the speaker's actual words; never invent "
+            "or paraphrase into something not said. Respond with ONLY JSON: "
+            '{"quote": "<the line>", "index": <the [n] it came from>}. '
+            'If nothing is genuinely quotable, respond {"quote": "", "index": -1}.\n\n'
+            f"Excerpts:\n{joined}"
+        )
+        resp = await llm.acomplete(prompt)
+        match = re.search(r"\{.*\}", str(resp), re.DOTALL)
+        if not match:
+            return None
+        quote = (json.loads(match.group(0)).get("quote") or "").strip()
+        if not quote:
+            return None
+        source = _quote_grounded(quote, diverse)
+        if not source:
+            return None
+        meta = source.get("metadata", {})
+        return {
+            "text": quote,
+            "title": meta.get("title"),
+            "url": meta.get("url"),
+            "start_time": meta.get("start_time"),
+        }
+    except Exception:
+        return None
+
+
 @router.post("")
 async def chat(
     request: ChatRequest,
@@ -109,7 +238,8 @@ async def chat(
     Workspace-scoped streaming chat endpoint.
     Retrieves from consolidation_{workspace_id} namespace and streams a grounded answer.
     Applies source diversity so results span multiple videos, not just the closest one.
-    Response format: raw text tokens followed by \\n\\n__SOURCES__{json}.
+    Response format: raw text tokens, then \\n\\n__SOURCES__{json}, then \\n\\n__META__{json}
+    (scale, recurring themes, one grounded key quote — for the answer's supporting cards).
     On failure mid-stream, emits \\n\\n__ERROR__{json} instead of dropping the connection silently.
     """
     await verify_workspace_ownership(request.workspace_id, user_id)
@@ -141,6 +271,18 @@ async def chat(
                 yield f"\n\n__SOURCES__{json.dumps([])}"
                 return
 
+            # Key quote runs concurrently on a cheap model so its latency hides behind
+            # the main answer's streaming; awaited once at the end for the meta block.
+            quote_llm = OpenAILike(
+                model=_TIER_MODELS[_DEFAULT_TIER],
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.0,
+                max_tokens=256,
+                is_chat_model=True,
+            )
+            quote_task = asyncio.create_task(_extract_key_quote(diverse, quote_llm))
+
             context_parts = []
             for c in diverse:
                 meta = c.get("metadata", {})
@@ -150,7 +292,7 @@ async def chat(
                 context_parts.append(f"{header}\n{c['text']}")
             context = "\n\n---\n\n".join(context_parts)
 
-            system = _build_system_prompt(request.instructions)
+            system = _build_system_prompt(request.instructions, request.creator_name)
 
             prompt = (
                 f"{system}\n\n"
@@ -187,6 +329,29 @@ async def chat(
                 for c in diverse
             ]
             yield f"\n\n__SOURCES__{json.dumps(sources)}"
+
+            # Meta cards: what the answer was synthesized from, the recurring themes it
+            # touches (from clustering), and one grounded key quote. Each piece degrades
+            # to empty/None independently so a slow or failed part never blocks the rest.
+            category_ids: List[int] = []
+            for c in diverse:
+                cid = c.get("metadata", {}).get("category_id")
+                if cid is not None and cid not in category_ids:
+                    category_ids.append(cid)
+            themes = await _collect_themes(category_ids, request.workspace_id)
+            distinct_sources = {
+                (c.get("metadata", {}).get("source_id") or c["id"]) for c in diverse
+            }
+            try:
+                key_quote = await quote_task
+            except Exception:
+                key_quote = None
+            meta = {
+                "scale": {"sources": len(distinct_sources), "excerpts": len(diverse)},
+                "themes": themes,
+                "key_quote": key_quote,
+            }
+            yield f"\n\n__META__{json.dumps(meta)}"
 
         except Exception as e:
             print(f"[CHAT] generation failed for workspace={request.workspace_id}: {e}")
