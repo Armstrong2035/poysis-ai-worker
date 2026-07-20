@@ -34,7 +34,7 @@ class ChatRequest(BaseModel):
     min_score: Optional[float] = 0.4
     model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
     temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
-    max_tokens: Optional[int] = 2048               # OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
+    max_tokens: Optional[int] = 800                # backstop for brief, screenshot-friendly answers (prompt does the real work). Also: OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
     instructions: Optional[str] = None                  # system prompt from playground branding
     creator_name: Optional[str] = None                  # author of the body of work, for voice ("Across his talks, X…")
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
@@ -81,6 +81,10 @@ def _synthesis_contract(creator_name: Optional[str]) -> str:
         "clear. NEVER call this a 'notebook' or repeat a display label — that breaks the "
         "spell. When it fits, open with the single central idea the material keeps returning "
         "to, then let the rest flow from it.\n\n"
+        "LENGTH: keep it brief and screenshot-worthy — a few tight sentences, ideally under "
+        "~120 words. Lead with the core idea in the very first line; cut preamble, "
+        "throat-clearing, and 'in summary' endings. Short paragraphs, no filler. Depth comes "
+        "from precision, not length.\n\n"
         f"Put {speaker} at the center: 'He teaches…', '{speaker} keeps returning to…', "
         "'Across these teachings…' — not 'the documents say' or 'the context mentions.' "
         "Synthesize across the excerpts: draw out the recurring principles, connect what "
