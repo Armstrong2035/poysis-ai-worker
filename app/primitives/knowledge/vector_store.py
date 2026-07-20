@@ -101,6 +101,7 @@ class VectorService:
         metadata_filter: Optional[Dict[str, Any]] = None,
         source_types: Optional[List[str]] = None,
         topic_ids: Optional[List[int]] = None,
+        connection_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         limit = max(top_k, _CANDIDATE_CEILING)
         vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
@@ -126,6 +127,13 @@ class VectorService:
             # treating it as "no restriction" would search the whole workspace.
             conditions.append("(metadata->>'category_id')::int = ANY(%s)")
             params.append(topic_ids)
+
+        if connection_ids is not None:
+            # connection_id is the youtube_channels.id (etc.) written at ingest,
+            # matching the id the playground sends after stripping its "conn:" prefix.
+            # Same empty-list-is-a-real-allowlist rule as topic_ids above.
+            conditions.append("metadata->>'connection_id' = ANY(%s)")
+            params.append(connection_ids)
 
         where = " AND ".join(conditions)
         params += [vec_str, limit]

@@ -97,19 +97,28 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
                 "indexed_files": indexed_files,
             })
 
-        # Update job: moving to clustering phase
-        status_update = {
-            "status": "clustering",
-            "vectors_indexed": total_vectors,
-            "docs_processed": total_docs,
-            "docs_skipped": total_skipped,
-            "docs_orphaned": total_orphaned,
-            "iterations": iteration,
-        }
-        _jobs[workspace_id] = {**_jobs[workspace_id], **status_update}
-        await db.update_job(job_id, "running", result=status_update)
+        # Only re-cluster when the corpus actually changed. The cron re-runs
+        # snapshots frequently; without this guard each run would re-cluster the
+        # same docs (UMAP/HDBSCAN + semantic analysis + full topic/story rebuild)
+        # even when nothing new was ingested or removed.
+        corpus_changed = total_docs > 0 or total_orphaned > 0
+        if corpus_changed:
+            # Update job: moving to clustering phase
+            status_update = {
+                "status": "clustering",
+                "vectors_indexed": total_vectors,
+                "docs_processed": total_docs,
+                "docs_skipped": total_skipped,
+                "docs_orphaned": total_orphaned,
+                "iterations": iteration,
+            }
+            _jobs[workspace_id] = {**_jobs[workspace_id], **status_update}
+            await db.update_job(job_id, "running", result=status_update)
 
-        cluster_result = await clustering_engine.run_clustering(workspace_id)
+            cluster_result = await clustering_engine.run_clustering(workspace_id)
+        else:
+            print(f"[Snapshot] No new or removed docs for '{workspace_id}' — skipping clustering")
+            cluster_result = {"status": "skipped"}
 
         # Update drive connection's last_synced_at to mark snapshot as complete
         await db.mark_drive_connection_synced(workspace_id)
@@ -214,6 +223,7 @@ async def discover(
         drive_folder_ids=req.drive_folder_ids,
         google_access_token=access_token,
         youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
     )
 
     runner = SnapshotRunner(scope=scope)
@@ -283,6 +293,7 @@ async def run_snapshot(
         google_access_token=access_token,
         indexed_files=indexed_files,
         youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         **({"youtube_min_duration_seconds": min(yt_min_durations)} if yt_min_durations else {}),
     )
 

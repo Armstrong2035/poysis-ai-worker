@@ -17,6 +17,10 @@ class ScopeConfig(BaseModel):
     indexed_files: Dict[str, str] = {}  # source_id -> etag (modifiedTime)
     nango_sources: List[str] = []       # providers managed via Nango, e.g. ["notion", "slack"]
     youtube_channel_ids: List[str] = [] # YouTube channel IDs (no OAuth needed)
+    # channel_id -> youtube_channels.id (the "connection" the playground scopes a bot
+    # to). Stamped onto each vector at ingest so retrieval can filter a bot to its
+    # connection. Empty map = no tagging.
+    youtube_channel_connections: Dict[str, str] = {}
     # Minimum video length to ingest. Defaults to 45min, which suits long-form
     # sermon/lecture channels but silently excludes every video on a channel of
     # short talks — set this per workspace when seeding a bot from a channel whose

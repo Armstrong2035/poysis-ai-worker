@@ -17,6 +17,9 @@ class RawSourceItem(BaseModel):
     fetch_url: Optional[str] = None
     mime_type: Optional[str] = None
     size_bytes: int = 0
+    # The source "connection" this item belongs to (e.g. youtube_channels.id).
+    # Carried into vector metadata so retrieval can scope a bot to its connection.
+    connection_id: Optional[str] = None
 
 
 class BaseConnector(ABC):

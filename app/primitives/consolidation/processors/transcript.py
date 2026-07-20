@@ -67,6 +67,7 @@ class TranscriptProcessor:
                 "start_time": _fmt(start_s),
                 "end_time": _fmt(end_s),
                 "start_seconds": start_s,
+                **({"connection_id": item.connection_id} if item.connection_id else {}),
             },
         )
 
