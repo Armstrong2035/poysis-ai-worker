@@ -11,7 +11,7 @@ import asyncio
 import os
 import re
 from datetime import datetime, timezone
-from typing import AsyncIterator, List
+from typing import AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -23,9 +23,16 @@ MIN_DURATION_SECONDS = 2700  # skip anything shorter than 45 minutes
 
 
 class YouTubeConnector(BaseConnector):
-    def __init__(self, channel_ids: List[str], min_duration_seconds: int = MIN_DURATION_SECONDS):
+    def __init__(
+        self,
+        channel_ids: List[str],
+        min_duration_seconds: int = MIN_DURATION_SECONDS,
+        channel_connections: Optional[Dict[str, str]] = None,
+    ):
         self.channel_ids = channel_ids
         self.min_duration_seconds = min_duration_seconds
+        # channel_id -> connection id (youtube_channels.id); tags each yielded item.
+        self.channel_connections = channel_connections or {}
         self.api_key = os.environ.get("YOUTUBE_API_KEY", "")
         # Videos dropped for being shorter than the threshold. A channel that lists
         # videos but yields none is indistinguishable from an empty channel unless
@@ -96,6 +103,7 @@ class YouTubeConnector(BaseConnector):
                             last_modified=last_modified,
                             content_type="document",
                             size_bytes=0,
+                            connection_id=self.channel_connections.get(channel_id),
                         )
                         fetched += 1
                         if fetched >= limit:

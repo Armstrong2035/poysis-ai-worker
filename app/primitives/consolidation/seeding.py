@@ -84,9 +84,11 @@ async def ingest_and_cluster(
     progress_callback: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
     """Run the snapshot to completion, then build topics. Returns run totals."""
+    yt_channels = await db.get_youtube_channels(workspace_id)
     scope = ScopeConfig(
         workspace_id=workspace_id,
         youtube_channel_ids=[channel_id],
+        youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         youtube_min_duration_seconds=min_duration_seconds,
         doc_limit=doc_limit,
     )

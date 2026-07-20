@@ -223,6 +223,7 @@ async def discover(
         drive_folder_ids=req.drive_folder_ids,
         google_access_token=access_token,
         youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
     )
 
     runner = SnapshotRunner(scope=scope)
@@ -292,6 +293,7 @@ async def run_snapshot(
         google_access_token=access_token,
         indexed_files=indexed_files,
         youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         **({"youtube_min_duration_seconds": min(yt_min_durations)} if yt_min_durations else {}),
     )
 

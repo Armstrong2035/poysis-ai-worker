@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import AsyncIterator, List
+from typing import AsyncIterator, Dict, List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.connectors.base import RawSourceItem
@@ -21,9 +21,17 @@ def _nango_connector_map() -> dict:
     }
 
 
-def _youtube_connector(channel_ids: List[str], min_duration_seconds: int):
+def _youtube_connector(
+    channel_ids: List[str],
+    min_duration_seconds: int,
+    channel_connections: Optional[Dict[str, str]] = None,
+):
     from app.primitives.consolidation.connectors.youtube import YouTubeConnector
-    return YouTubeConnector(channel_ids=channel_ids, min_duration_seconds=min_duration_seconds)
+    return YouTubeConnector(
+        channel_ids=channel_ids,
+        min_duration_seconds=min_duration_seconds,
+        channel_connections=channel_connections,
+    )
 
 
 MAX_CHUNKS_PER_DOC = 2000
@@ -232,7 +240,9 @@ class SnapshotRunner:
 
         if self.scope.youtube_channel_ids:
             yt_connector = _youtube_connector(
-                self.scope.youtube_channel_ids, self.scope.youtube_min_duration_seconds
+                self.scope.youtube_channel_ids,
+                self.scope.youtube_min_duration_seconds,
+                self.scope.youtube_channel_connections,
             )
             yt_tasks = []
             yt_queue: asyncio.Queue = asyncio.Queue()
