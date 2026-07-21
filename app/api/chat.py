@@ -13,16 +13,12 @@ from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-# If the primary model (below) is down, rate-limited, or otherwise unavailable, OpenRouter
-# retries these in order before failing the request.
-_FALLBACK_MODELS = ["deepseek/deepseek-v4-flash"]
-
 # Client sends a tier name, not a raw model ID — keeps model choice out of the
 # client and lets us swap the underlying model per tier without a client release.
 _TIER_MODELS = {
-    "quick": "google/gemini-3.5-flash",
-    "thinking": "anthropic/claude-sonnet-5",
-    "expert": "anthropic/claude-opus-4-8",
+    "quick": "gpt-4.1-mini",
+    "thinking": "gpt-4.1",
+    "expert": "gpt-4.1",
 }
 _DEFAULT_TIER = "quick"
 
@@ -34,7 +30,7 @@ class ChatRequest(BaseModel):
     min_score: Optional[float] = 0.4
     model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
     temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
-    max_tokens: Optional[int] = 800                # backstop for brief, screenshot-friendly answers (prompt does the real work). Also: OpenRouter checks credit against a model's max possible output, not actual usage — leaving this unset causes spurious 402s on models with large output ceilings (e.g. Gemini 2.5 Flash's 65535)
+    max_tokens: Optional[int] = 800                # backstop for brief, screenshot-friendly answers (prompt does the real work)
     instructions: Optional[str] = None                  # system prompt from playground branding
     creator_name: Optional[str] = None                  # author of the body of work, for voice ("Across his talks, X…")
     allowed_connection_ids: Optional[List[str]] = None  # connection-level scope, e.g. ["youtube"]
@@ -279,8 +275,8 @@ async def chat(
             # the main answer's streaming; awaited once at the end for the meta block.
             quote_llm = OpenAILike(
                 model=_TIER_MODELS[_DEFAULT_TIER],
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-                api_base="https://openrouter.ai/api/v1",
+                api_key=os.getenv("OPENAI_API_KEY"),
+                api_base="https://api.openai.com/v1",
                 temperature=0.0,
                 max_tokens=256,
                 is_chat_model=True,
@@ -307,12 +303,11 @@ async def chat(
 
             llm = OpenAILike(
                 model=_TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-                api_base="https://openrouter.ai/api/v1",
+                api_key=os.getenv("OPENAI_API_KEY"),
+                api_base="https://api.openai.com/v1",
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
                 is_chat_model=True,
-                additional_kwargs={"extra_body": {"models": _FALLBACK_MODELS}},
             )
             streaming_response = await llm.astream_complete(prompt)
             async for delta in streaming_response:
