@@ -29,6 +29,7 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = 8            # synthesis across sources needs more material than lookup does
     min_score: Optional[float] = 0.4
     model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
+    mode: Optional[str] = None   # "retrieval" | "synthesis"; None → classify the query
     temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
     max_tokens: Optional[int] = 800                # backstop for brief, screenshot-friendly answers (prompt does the real work)
     instructions: Optional[str] = None                  # system prompt from playground branding
@@ -229,131 +230,215 @@ async def _extract_key_quote(diverse: List[Dict[str, Any]], llm) -> Optional[Dic
         return None
 
 
+async def _classify_intent(query: str) -> str:
+    """
+    Decide whether a query wants plain RETRIEVAL (find/list/look up specific sources) or
+    SYNTHESIS (an interpreted answer drawn across the body of work). The distinction is
+    verb/intent-driven, so a cheap LLM classifies it rather than embedding proximity, which
+    keys on topic. Runs concurrently with retrieval, so its latency hides behind that fetch.
+
+    Fails toward "synthesis" — the platform's default behavior — on any error, so the
+    classifier can never make a query worse than it is today.
+    """
+    from llama_index.llms.openai_like import OpenAILike
+
+    try:
+        llm = OpenAILike(
+            model=_TIER_MODELS[_DEFAULT_TIER],
+            api_key=os.getenv("OPENAI_API_KEY"),
+            api_base="https://api.openai.com/v1",
+            temperature=0.0,
+            max_tokens=5,
+            is_chat_model=True,
+        )
+        prompt = (
+            "Classify the user's query as either RETRIEVAL or SYNTHESIS.\n\n"
+            "RETRIEVAL — they want to find, list, or browse specific sources, or look up a "
+            "stated item. They want pointers to material, not an essay.\n"
+            "  \"list my youtube videos\" → retrieval\n"
+            "  \"which talks mention prayer\" → retrieval\n"
+            "  \"find the video about fasting\" → retrieval\n\n"
+            "SYNTHESIS — they want an interpreted answer drawn across the body of work.\n"
+            "  \"what does he teach about faith\" → synthesis\n"
+            "  \"explain his view on suffering\" → synthesis\n"
+            "  \"summarize his thinking on prayer\" → synthesis\n\n"
+            "Answer with ONLY one word: retrieval or synthesis.\n\n"
+            f"Query: {query}\nAnswer:"
+        )
+        resp = str(await llm.acomplete(prompt)).strip().lower()
+        return "retrieval" if "retriev" in resp else "synthesis"
+    except Exception:
+        return "synthesis"
+
+
+async def _retrieve(engine: KnowledgeEngine, request: ChatRequest) -> List[Dict[str, Any]]:
+    """
+    Shared retrieval core for both chat modes: over-fetch a wide pool so diversity has
+    candidates from many sources, apply the min_score floor, trim to the natural relevance
+    cliff, then round-robin across sources. Returns the final diversified chunks (maybe empty).
+    """
+    candidates = await engine.fetch_raw(
+        notebook_id=f"consolidation_{request.workspace_id}",
+        text=request.query,
+        top_k=request.top_k * 6,
+        connection_ids=request.allowed_connection_ids,
+        topic_ids=request.allowed_topic_ids,
+    )
+    above_threshold = [c for c in candidates if c.get("score", 0) >= request.min_score]
+    # min_score is the floor (guards the "nothing relevant" case); the gap detector then
+    # trims to the natural relevance cliff within what clears it.
+    gapped = engine.vector_service.detect_score_gap(above_threshold, min_results=request.top_k)
+    return _diversify(gapped, request.top_k)
+
+
+def _build_sources(diverse: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Source cards for the response, emitted by both retrieval and synthesis modes."""
+    return [
+        {
+            "title": c["metadata"].get("title"),
+            "url": c["metadata"].get("url"),          # already includes ?t= deep-link
+            "source_type": c["metadata"].get("source_type"),
+            "source_id": c["metadata"].get("source_id"),
+            "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
+            "timestamp_end_ms": c["metadata"].get("timestamp_end_ms"),
+            "start_time": c["metadata"].get("start_time"),
+            "score": round(c["score"], 4),
+            "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
+        }
+        for c in diverse
+    ]
+
+
 @router.post("")
 async def chat(
     request: ChatRequest,
     user_id: str = Depends(get_user_id),
 ):
     """
-    Workspace-scoped streaming chat endpoint.
-    Retrieves from consolidation_{workspace_id} namespace and streams a grounded answer.
-    Applies source diversity so results span multiple videos, not just the closest one.
-    Response format: raw text tokens, then \\n\\n__SOURCES__{json}, then \\n\\n__META__{json}
-    (scale, recurring themes, one grounded key quote — for the answer's supporting cards).
-    On failure mid-stream, emits \\n\\n__ERROR__{json} instead of dropping the connection silently.
+    Workspace-scoped chat endpoint that serves two modes over one streaming response.
+    Retrieves from consolidation_{workspace_id} with source diversity, then:
+      - SYNTHESIS (default): streams a grounded answer, then \\n\\n__SOURCES__{json},
+        then \\n\\n__META__{json} (scale, themes, one grounded key quote). Byte-for-byte
+        the original contract — no leading marker.
+      - RETRIEVAL: leads with \\n\\n__MODE__{json} (so a client renders a source list, not
+        a typing indicator), then __SOURCES__ and a leaner __META__ (scale, themes; no
+        key quote). No synthesized prose, no synthesis LLM call.
+    The mode is `request.mode` when given, otherwise inferred by _classify_intent (run
+    concurrently with retrieval). On failure mid-stream, emits \\n\\n__ERROR__{json}.
     """
     await verify_workspace_ownership(request.workspace_id, user_id)
 
     engine = KnowledgeEngine()
-    namespace = f"consolidation_{request.workspace_id}"
 
     async def generate():
         from llama_index.llms.openai_like import OpenAILike
 
         try:
-            # Fetch a wide pool so diversity filtering has candidates from many sources
-            candidates = await engine.fetch_raw(
-                notebook_id=namespace,
-                text=request.query,
-                top_k=request.top_k * 6,
-                connection_ids=request.allowed_connection_ids,
-                topic_ids=request.allowed_topic_ids,
+            # Classify intent concurrently with retrieval when no explicit mode is given:
+            # both must happen, retrieval is network-bound, so the classifier's latency
+            # hides behind the fetch. _classify_intent never raises (defaults to synthesis).
+            classify_task = (
+                asyncio.create_task(_classify_intent(request.query))
+                if request.mode is None else None
             )
-
-            above_threshold = [c for c in candidates if c.get("score", 0) >= request.min_score]
-            # min_score is the floor (guards the "nothing relevant" case below); the gap
-            # detector then trims to the natural relevance cliff within what clears it.
-            gapped = engine.vector_service.detect_score_gap(above_threshold, min_results=request.top_k)
-            diverse = _diversify(gapped, request.top_k)
+            diverse = await _retrieve(engine, request)
+            mode = request.mode if classify_task is None else await classify_task
 
             if not diverse:
-                yield "I couldn't find relevant information in your knowledge base to answer that question."
+                # No results: retrieval mode still self-identifies (leading __MODE__, empty
+                # source list, no prose) so the client renders its empty state; synthesis
+                # returns the human "couldn't find" line as before.
+                if mode == "retrieval":
+                    yield f"__MODE__{json.dumps({'mode': 'retrieval'})}"
+                else:
+                    yield "I couldn't find relevant information in your knowledge base to answer that question."
                 yield f"\n\n__SOURCES__{json.dumps([])}"
                 return
 
-            # Key quote runs concurrently on a cheap model so its latency hides behind
-            # the main answer's streaming; awaited once at the end for the meta block.
-            quote_llm = OpenAILike(
-                model=_TIER_MODELS[_DEFAULT_TIER],
-                api_key=os.getenv("OPENAI_API_KEY"),
-                api_base="https://api.openai.com/v1",
-                temperature=0.0,
-                max_tokens=256,
-                is_chat_model=True,
-            )
-            quote_task = asyncio.create_task(_extract_key_quote(diverse, quote_llm))
-
-            context_parts = []
-            for c in diverse:
-                meta = c.get("metadata", {})
-                label = meta.get("title") or meta.get("source_file") or "unknown"
-                start_time = meta.get("start_time", "")
-                header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
-                context_parts.append(f"{header}\n{c['text']}")
-            context = "\n\n---\n\n".join(context_parts)
-
-            system = _build_system_prompt(request.instructions, request.creator_name)
-
-            prompt = (
-                f"{system}\n\n"
-                f"Context:\n{context}\n\n"
-                f"Question: {request.query}\n\n"
-                "Answer:"
-            )
-
-            llm = OpenAILike(
-                model=_TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
-                api_key=os.getenv("OPENAI_API_KEY"),
-                api_base="https://api.openai.com/v1",
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                is_chat_model=True,
-            )
-            streaming_response = await llm.astream_complete(prompt)
-            async for delta in streaming_response:
-                yield delta.delta
-
-            sources = [
-                {
-                    "title": c["metadata"].get("title"),
-                    "url": c["metadata"].get("url"),          # already includes ?t= deep-link
-                    "source_type": c["metadata"].get("source_type"),
-                    "source_id": c["metadata"].get("source_id"),
-                    "timestamp_start_ms": c["metadata"].get("timestamp_start_ms"),
-                    "timestamp_end_ms": c["metadata"].get("timestamp_end_ms"),
-                    "start_time": c["metadata"].get("start_time"),
-                    "score": round(c["score"], 4),
-                    "snippet": c["text"][:200] + ("..." if len(c["text"]) > 200 else ""),
-                }
-                for c in diverse
-            ]
-            yield f"\n\n__SOURCES__{json.dumps(sources)}"
-
-            # Meta cards: what the answer was synthesized from, the recurring themes it
-            # touches (from clustering), and one grounded key quote. Each piece degrades
-            # to empty/None independently so a slow or failed part never blocks the rest.
+            # Shared meta inputs for both modes' __META__ and the topic-graph log.
             category_ids: List[int] = []
             for c in diverse:
                 cid = c.get("metadata", {}).get("category_id")
                 if cid is not None and cid not in category_ids:
                     category_ids.append(cid)
-            themes = await _collect_themes(category_ids, request.workspace_id)
             distinct_sources = {
                 (c.get("metadata", {}).get("source_id") or c["id"]) for c in diverse
             }
-            try:
-                key_quote = await quote_task
-            except Exception:
-                key_quote = None
-            meta = {
-                "scale": {"sources": len(distinct_sources), "excerpts": len(diverse)},
-                "themes": themes,
-                "key_quote": key_quote,
-            }
-            yield f"\n\n__META__{json.dumps(meta)}"
 
-            # Persist the turn as a topic-graph / training event. Fire-and-forget so it
-            # never blocks or breaks the response (log_topic_event swallows its own errors).
+            if mode == "retrieval":
+                # Sources only — no answer to synthesize, and no key quote (that's an LLM
+                # call; retrieval stays LLM-free). Themes are a cheap DB lookup, kept.
+                yield f"__MODE__{json.dumps({'mode': 'retrieval'})}"
+                yield f"\n\n__SOURCES__{json.dumps(_build_sources(diverse))}"
+                themes = await _collect_themes(category_ids, request.workspace_id)
+                meta = {
+                    "scale": {"sources": len(distinct_sources), "excerpts": len(diverse)},
+                    "themes": themes,
+                }
+                yield f"\n\n__META__{json.dumps(meta)}"
+            else:
+                # Key quote runs concurrently on a cheap model so its latency hides behind
+                # the main answer's streaming; awaited once at the end for the meta block.
+                quote_llm = OpenAILike(
+                    model=_TIER_MODELS[_DEFAULT_TIER],
+                    api_key=os.getenv("OPENAI_API_KEY"),
+                    api_base="https://api.openai.com/v1",
+                    temperature=0.0,
+                    max_tokens=256,
+                    is_chat_model=True,
+                )
+                quote_task = asyncio.create_task(_extract_key_quote(diverse, quote_llm))
+
+                context_parts = []
+                for c in diverse:
+                    meta = c.get("metadata", {})
+                    label = meta.get("title") or meta.get("source_file") or "unknown"
+                    start_time = meta.get("start_time", "")
+                    header = f"[{label}" + (f" @ {start_time}" if start_time else "") + "]"
+                    context_parts.append(f"{header}\n{c['text']}")
+                context = "\n\n---\n\n".join(context_parts)
+
+                system = _build_system_prompt(request.instructions, request.creator_name)
+
+                prompt = (
+                    f"{system}\n\n"
+                    f"Context:\n{context}\n\n"
+                    f"Question: {request.query}\n\n"
+                    "Answer:"
+                )
+
+                llm = OpenAILike(
+                    model=_TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
+                    api_key=os.getenv("OPENAI_API_KEY"),
+                    api_base="https://api.openai.com/v1",
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                    is_chat_model=True,
+                )
+                streaming_response = await llm.astream_complete(prompt)
+                async for delta in streaming_response:
+                    yield delta.delta
+
+                yield f"\n\n__SOURCES__{json.dumps(_build_sources(diverse))}"
+
+                # Meta cards: recurring themes it touches (from clustering) and one grounded
+                # key quote. Each degrades to empty/None independently so a slow or failed
+                # part never blocks the rest.
+                themes = await _collect_themes(category_ids, request.workspace_id)
+                try:
+                    key_quote = await quote_task
+                except Exception:
+                    key_quote = None
+                meta = {
+                    "scale": {"sources": len(distinct_sources), "excerpts": len(diverse)},
+                    "themes": themes,
+                    "key_quote": key_quote,
+                }
+                yield f"\n\n__META__{json.dumps(meta)}"
+
+            # Persist the turn as a topic-graph / training event (both modes — retrieval
+            # turns are graph/training data too). Fire-and-forget so it never blocks or
+            # breaks the response (log_topic_event swallows its own errors).
             asyncio.create_task(DatabaseService().log_topic_event({
                 "workspace_id": request.workspace_id,
                 "user_id": user_id,
