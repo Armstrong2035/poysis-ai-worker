@@ -127,9 +127,14 @@ class YouTubeConnector(BaseConnector):
         return await self._fetch_segments_library(item)
 
     async def _fetch_segments_library(self, item: RawSourceItem) -> List[dict]:
-        """youtube-transcript-api path — no credentials, but blocked from datacenter IPs."""
+        """youtube-transcript-api path. Blocked from datacenter IPs on its own; routes
+        through a residential proxy (YT_DLP_PROXY, shared with the yt-dlp backend) when set
+        so it survives from Railway. Uses requests under the hood, so proxying is clean."""
         from youtube_transcript_api import YouTubeTranscriptApi
-        ytt = YouTubeTranscriptApi()
+        from youtube_transcript_api.proxies import GenericProxyConfig
+        proxy = os.getenv("YT_DLP_PROXY")
+        proxy_config = GenericProxyConfig(http_url=proxy, https_url=proxy) if proxy else None
+        ytt = YouTubeTranscriptApi(proxy_config=proxy_config)
         for attempt in range(4):
             try:
                 fetched = ytt.fetch(item.source_id)
