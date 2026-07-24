@@ -353,6 +353,11 @@ def _ytdlp_json3_segments(url: str, video_id: str) -> List[dict]:
             "noprogress": True,
             "retries": 3,
         }
+        # YouTube blocks caption fetches from datacenter IPs; route through a residential
+        # proxy when configured so the exit IP looks like an ordinary viewer.
+        proxy = os.getenv("YT_DLP_PROXY")
+        if proxy:
+            ydl_opts["proxy"] = proxy
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
