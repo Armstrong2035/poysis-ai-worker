@@ -301,6 +301,56 @@ async def list_youtube_channels(
     return {"channels": channels}
 
 
+@router.get("/youtube/playlists")
+async def list_youtube_playlists(
+    workspace_id: str = Query(...),
+    user_id: str = Depends(get_user_id),
+):
+    """List the playlists on the workspace's connected YouTube channel(s).
+
+    Read-only (Data API, no scraping) — works even while transcript fetching is blocked.
+    The frontend offers these as ready-made categories to import.
+    """
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    from app.primitives.consolidation import playlists
+    try:
+        items = await playlists.list_playlists_for_workspace(db, workspace_id)
+    except playlists.PlaylistError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"workspace_id": workspace_id, "playlists": items}
+
+
+@router.post("/youtube/playlists/import")
+async def import_youtube_playlists(
+    workspace_id: str = Form(...),
+    playlist_ids: str = Form(...),
+    user_id: str = Depends(get_user_id),
+):
+    """Import selected playlists as locked categories (overlay — does not scope ingestion).
+
+    playlist_ids is a comma-separated list of playlist ids. Creates a topic per playlist,
+    locks it, records video membership, and stamps any already-ingested vectors so the
+    categories are chat-scopeable immediately where transcripts already exist.
+    """
+    workspace = await db.get_workspace(workspace_id)
+    if not workspace or workspace.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    ids = [p.strip() for p in playlist_ids.split(",") if p.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No playlist_ids provided")
+
+    from app.primitives.consolidation import playlists
+    try:
+        result = await playlists.import_playlists_as_categories(db, workspace_id, user_id, ids)
+    except playlists.PlaylistError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "imported", **result}
+
+
 @router.delete("/nango/{provider}")
 async def disconnect_nango_source(
     provider: str,

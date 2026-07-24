@@ -196,6 +196,53 @@ async def test_mcp_list_documents():
 
 
 # ---------------------------------------------------------------------------
+# Test 6b: intent classifier — retrieval vs synthesis (live model call)
+# ---------------------------------------------------------------------------
+async def test_classify_intent():
+    header("6b. Intent classifier — retrieval vs synthesis")
+    from app.api.chat import _classify_intent
+
+    # (query, expected label)
+    cases = [
+        ("list my youtube videos", "retrieval"),
+        ("which talks mention prayer", "retrieval"),
+        ("i'm looking for the sermon he titled the word of his grace", "retrieval"),
+        ("what does he teach about faith", "synthesis"),
+        ("how to pray", "synthesis"),
+        ("summarize his thinking on suffering", "synthesis"),
+    ]
+    for query, expected in cases:
+        got = await _classify_intent(query)
+        (ok if got == expected else fail)(
+            f"{got:10s} <- {query!r}" if got == expected
+            else f"expected {expected}, got {got!r} <- {query!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 6c: classifier fail-safe — any error defaults to synthesis
+# ---------------------------------------------------------------------------
+async def test_classify_fail_safe():
+    header("6c. Classifier fail-safe → synthesis on error")
+    import llama_index.llms.openai_like as oil
+    from app.api.chat import _classify_intent
+
+    original = oil.OpenAILike
+    def boom(*a, **k):
+        raise RuntimeError("simulated LLM outage")
+    oil.OpenAILike = boom
+    try:
+        result = await _classify_intent("anything at all")
+    finally:
+        oil.OpenAILike = original
+
+    (ok if result == "synthesis" else fail)(
+        "classifier error defaulted to 'synthesis'" if result == "synthesis"
+        else f"expected 'synthesis' on error, got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 7: HTTP streaming /chat (requires server running)
 # ---------------------------------------------------------------------------
 async def test_http_chat():
@@ -215,7 +262,7 @@ async def test_http_chat():
         "workspace_id": WORKSPACE_ID,
         "query": "what has been preached about grace?",
         "top_k": 3,
-        "allowed_connection_ids": ["youtube"],
+        # No connection scope: connection_id is a youtube_channels.id (UUID), not "youtube".
     }
 
     print(f"  Hitting {WORKER_URL}/chat ...")
@@ -259,6 +306,64 @@ async def test_http_chat():
 
 
 # ---------------------------------------------------------------------------
+# Test 8: HTTP /chat with mode=retrieval override (requires server running)
+# ---------------------------------------------------------------------------
+async def test_http_retrieval_mode():
+    header("8. HTTP — POST /chat mode=retrieval (override)")
+    if not USER_ID:
+        fail("TEST_USER_ID not set in .env — skipping HTTP test")
+        return
+
+    try:
+        import httpx
+    except ImportError:
+        fail("httpx not installed — run: pip install httpx")
+        return
+
+    payload = {
+        "workspace_id": WORKSPACE_ID,
+        "query": "what has been preached about grace?",  # a synthesis-style query, forced to retrieval
+        "top_k": 3,
+        "mode": "retrieval",
+    }
+
+    print(f"  Hitting {WORKER_URL}/chat (mode=retrieval) ...")
+    buf = ""
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream(
+                "POST",
+                f"{WORKER_URL}/chat",
+                json=payload,
+                headers={"X-User-ID": USER_ID},
+            ) as resp:
+                if resp.status_code != 200:
+                    fail(f"HTTP {resp.status_code}")
+                    print(f"     {await resp.aread()}")
+                    return
+                async for chunk in resp.aiter_text():
+                    buf += chunk
+    except Exception as e:
+        fail(f"Request failed: {e}")
+        return
+
+    # Retrieval mode self-identifies with a leading __MODE__ marker and carries sources,
+    # with no synthesized prose before the marker.
+    (ok if buf.lstrip().startswith("__MODE__") else fail)(
+        "stream leads with __MODE__ marker (retrieval self-identifies)"
+        if buf.lstrip().startswith("__MODE__") else f"expected leading __MODE__, got {buf[:80]!r}"
+    )
+    (ok if "__SOURCES__" in buf else fail)(
+        "__SOURCES__ present" if "__SOURCES__" in buf else "no __SOURCES__ in retrieval response"
+    )
+    pre = buf.split("__MODE__", 1)[0]
+    (ok if pre.strip() == "" else fail)(
+        "no synthesized prose before sources" if pre.strip() == ""
+        else f"unexpected prose before __MODE__: {pre[:80]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 async def main():
@@ -271,9 +376,12 @@ async def main():
     await test_diversity()
     await test_mcp_list_topics()
     await test_mcp_list_documents()
+    await test_classify_intent()
+    await test_classify_fail_safe()
 
     if HTTP_MODE:
         await test_http_chat()
+        await test_http_retrieval_mode()
 
     print(f"\n{'='*60}")
     print("  Done.")
