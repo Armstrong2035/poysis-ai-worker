@@ -5,7 +5,6 @@ import os
 from typing import Optional
 
 from app.api.security import get_user_id
-from app.admin.auth import require_admin
 from app.primitives.database import DatabaseService
 from app.primitives.consolidation.google_auth import get_valid_token
 from app.primitives.nango import client as nango
@@ -358,12 +357,12 @@ async def import_youtube_playlists(
 @router.get("/youtube/debug/transcript")
 async def debug_transcript(
     video_id: str = Query("yTkFap9Kqdw", description="YouTube video id to test"),
-    user_id: str = Depends(require_admin),
 ):
     """Run both caption backends against one video and report which succeed, so we can
-    see whether yt-dlp beats the datacenter-IP block that kills the library. Admin-only.
+    see whether yt-dlp beats the datacenter-IP block that kills the library.
 
-    NOTE: temporary. Delete this endpoint once the answer is known.
+    NOTE: temporary and intentionally UNAUTHENTICATED so it's browser-openable — it only
+    fetches a public transcript and exposes no user data. Delete once the answer is known.
     """
     import time
     from datetime import datetime, timezone
