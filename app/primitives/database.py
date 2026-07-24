@@ -432,6 +432,76 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to fetch topics: {e}")
             return []
 
+    async def lock_topics(self, workspace_id: str, user_id: str, entries: list) -> None:
+        """Mark topics as locked (topic_overrides.locked=true) so reclustering preserves
+        them untouched. `entries` = [{"topic_id": int, "label": str}]. topic_overrides.topic_id
+        is text, so the int id is cast to str."""
+        if not self.client or not entries:
+            return
+        try:
+            rows = [
+                {
+                    "workspace_id": workspace_id,
+                    "topic_id": str(e["topic_id"]),
+                    "user_id": user_id,
+                    "locked": True,
+                    "custom_label": e.get("label"),
+                    "updated_at": "now()",
+                }
+                for e in entries
+            ]
+            self.client.table("topic_overrides").upsert(
+                rows, on_conflict="workspace_id,topic_id"
+            ).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to lock topics: {e}")
+
+    async def save_topic_documents(self, workspace_id: str, topic_id: int, videos: list) -> None:
+        """Upsert topic↔video membership with per-video metadata. `videos` = the connector's
+        playlist-item dicts; each becomes one topic_documents row (source_id = video_id)."""
+        if not self.client or not videos:
+            return
+        try:
+            rows = [
+                {
+                    "workspace_id": workspace_id,
+                    "topic_id": topic_id,
+                    "source_id": v["video_id"],
+                    "metadata": {
+                        "title": v.get("title"),
+                        "url": f"https://www.youtube.com/watch?v={v['video_id']}",
+                        "thumbnail": v.get("thumbnail"),
+                        "published_at": v.get("published_at"),
+                        "position": v.get("position"),
+                        "playlist_id": v.get("playlist_id"),
+                        "playlist_title": v.get("playlist_title"),
+                    },
+                }
+                for v in videos
+            ]
+            self.client.table("topic_documents").upsert(
+                rows, on_conflict="workspace_id,topic_id,source_id"
+            ).execute()
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to save topic documents: {e}")
+
+    async def get_topic_documents(self, workspace_id: str, topic_id: Optional[int] = None) -> list:
+        """Fetch topic↔video membership rows for a workspace, optionally one topic."""
+        if not self.client:
+            return []
+        try:
+            q = (
+                self.client.table("topic_documents")
+                .select("topic_id, source_id, metadata")
+                .eq("workspace_id", workspace_id)
+            )
+            if topic_id is not None:
+                q = q.eq("topic_id", topic_id)
+            return q.execute().data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to fetch topic documents: {e}")
+            return []
+
     async def add_waitlist_email(self, email: str, source: Optional[str] = None) -> bool:
         """Insert a waitlist signup. Idempotent on email (returns True if already present)."""
         if not self.client:

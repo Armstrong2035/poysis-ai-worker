@@ -203,6 +203,13 @@ Respond with ONLY valid JSON:
         # clustering entirely rather than letting the recluster re-sort them.
         locked_topic_ids = set(await self.db.get_locked_topic_ids(workspace_id))
         existing_category_map = await asyncio.to_thread(self.vector_service.fetch_category_assignments, namespace)
+        # Playlist-seeded categories record their membership in topic_documents before any
+        # vector carries a category_id. Treat that membership as authoritative for locked
+        # topics, so a freshly-backfilled playlist video is assigned to its locked category
+        # rather than reclustered away from it.
+        for row in await self.db.get_topic_documents(workspace_id):
+            if row.get("topic_id") in locked_topic_ids:
+                existing_category_map[row["source_id"]] = row["topic_id"]
         locked_source_ids = {sid for sid, cid in existing_category_map.items() if cid in locked_topic_ids}
         docs_for_clustering = [d for d in docs if d["source_id"] not in locked_source_ids]
 

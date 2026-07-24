@@ -28,3 +28,4 @@ mcp
 docx2txt
 python-pptx
 youtube-transcript-api
+yt-dlp

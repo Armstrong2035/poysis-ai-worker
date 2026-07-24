@@ -114,7 +114,20 @@ class YouTubeConnector(BaseConnector):
                         break
 
     async def fetch_segments(self, item: RawSourceItem) -> List[dict]:
-        """Return raw transcript segments: [{start, duration, text}, ...]."""
+        """Return raw transcript segments: [{start, duration, text}, ...].
+
+        Backend is chosen by YT_CAPTIONS_BACKEND: "ytdlp" routes through yt-dlp, which
+        reaches YouTube's caption endpoint with the same hardened client it uses for video
+        info — surviving the datacenter-IP blocks that 429 the default library. Anything
+        else (default) keeps the youtube-transcript-api path. Both emit the same shape.
+        """
+        backend = os.getenv("YT_CAPTIONS_BACKEND", "library").lower()
+        if backend == "ytdlp":
+            return await self._fetch_segments_ytdlp(item)
+        return await self._fetch_segments_library(item)
+
+    async def _fetch_segments_library(self, item: RawSourceItem) -> List[dict]:
+        """youtube-transcript-api path — no credentials, but blocked from datacenter IPs."""
         from youtube_transcript_api import YouTubeTranscriptApi
         ytt = YouTubeTranscriptApi()
         for attempt in range(4):
@@ -128,6 +141,13 @@ class YouTubeConnector(BaseConnector):
                     await asyncio.sleep(wait)
                 else:
                     raise RuntimeError(f"No captions for video {item.source_id}: {e}")
+
+    async def _fetch_segments_ytdlp(self, item: RawSourceItem) -> List[dict]:
+        """yt-dlp path — fetches the json3 caption track off-thread (yt-dlp is sync)."""
+        segments = await asyncio.to_thread(_ytdlp_json3_segments, item.url, item.source_id)
+        if not segments:
+            raise RuntimeError(f"No captions for video {item.source_id} (yt-dlp)")
+        return segments
 
     async def fetch_text(self, item: RawSourceItem) -> str:
         """Plain text fallback — no timestamps. Use fetch_segments for timed output."""
@@ -175,6 +195,90 @@ async def resolve_channel(raw_input: str, api_key: str) -> tuple[str, str]:
     return items[0]["id"], items[0]["snippet"]["title"]
 
 
+def _best_thumbnail(thumbnails: dict) -> Optional[str]:
+    """Pick the highest-res thumbnail URL the API returned, or None."""
+    if not thumbnails:
+        return None
+    for key in ("maxres", "standard", "high", "medium", "default"):
+        t = thumbnails.get(key)
+        if t and t.get("url"):
+            return t["url"]
+    return None
+
+
+async def list_channel_playlists(channel_id: str, api_key: str) -> List[Dict]:
+    """List a channel's public playlists via the Data API (key-auth, no scraping).
+
+    Returns [{playlist_id, title, description, item_count, thumbnail}]. Paginates until
+    the channel is exhausted. Used to offer playlists as ready-made categories.
+    """
+    playlists: List[Dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        page_token: Optional[str] = None
+        while True:
+            params = {
+                "part": "snippet,contentDetails",
+                "channelId": channel_id,
+                "maxResults": 50,
+                "key": api_key,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            data = await _get_with_retry(client, f"{_YT_API}/playlists", params)
+            for entry in data.get("items", []):
+                snippet = entry.get("snippet", {})
+                playlists.append({
+                    "playlist_id": entry.get("id"),
+                    "title": snippet.get("title", "Untitled"),
+                    "description": snippet.get("description", ""),
+                    "item_count": entry.get("contentDetails", {}).get("itemCount", 0),
+                    "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
+                })
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+    return playlists
+
+
+async def list_playlist_videos(playlist_id: str, api_key: str) -> List[Dict]:
+    """List the videos in a playlist via the Data API. Metadata only — no transcripts.
+
+    Returns [{video_id, title, thumbnail, published_at, position}], skipping deleted or
+    private entries (which carry no resolvable videoId).
+    """
+    videos: List[Dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        page_token: Optional[str] = None
+        while True:
+            params = {
+                "part": "snippet,contentDetails",
+                "playlistId": playlist_id,
+                "maxResults": 50,
+                "key": api_key,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            data = await _get_with_retry(client, f"{_YT_API}/playlistItems", params)
+            for entry in data.get("items", []):
+                snippet = entry.get("snippet", {})
+                video_id = entry.get("contentDetails", {}).get("videoId") or \
+                    snippet.get("resourceId", {}).get("videoId")
+                if not video_id:
+                    continue  # deleted/private entry
+                videos.append({
+                    "video_id": video_id,
+                    "title": snippet.get("title", "Untitled"),
+                    "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
+                    "published_at": entry.get("contentDetails", {}).get("videoPublishedAt")
+                    or snippet.get("publishedAt", ""),
+                    "position": snippet.get("position", len(videos)),
+                })
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+    return videos
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, retries: int = 3) -> dict:
     """GET with exponential backoff on 403/5xx — YouTube search is occasionally flaky."""
     for attempt in range(retries):
@@ -220,3 +324,55 @@ def _parse_iso8601_duration(iso: str) -> int:
         return 0
     h, mins, s = (int(x or 0) for x in m.groups())
     return h * 3600 + mins * 60 + s
+
+
+def _ytdlp_json3_segments(url: str, video_id: str) -> List[dict]:
+    """Download the English json3 caption track via yt-dlp and map it to timed segments.
+
+    Lets yt-dlp do the fetch (its hardened HTTP client is what gets past the datacenter-IP
+    blocking), writing the track to a temp file, then parses json3 into {start, duration,
+    text}. Returns [] when the video simply has no English captions. Synchronous — call via
+    a thread from async code.
+    """
+    import glob
+    import json as _json
+    import tempfile
+
+    from yt_dlp import YoutubeDL
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ydl_opts = {
+            "skip_download": True,
+            "writesubtitles": True,        # manual captions, preferred when present
+            "writeautomaticsub": True,     # fall back to auto-generated
+            "subtitleslangs": ["en", "en-US", "en-GB", "en-orig"],
+            "subtitlesformat": "json3",
+            "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "retries": 3,
+        }
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        files = sorted(glob.glob(os.path.join(tmp, "*.json3")))
+        if not files:
+            return []
+        with open(files[0], "r", encoding="utf-8") as f:
+            data = _json.load(f)
+
+    segments: List[dict] = []
+    for ev in data.get("events", []):
+        segs = ev.get("segs")
+        if not segs:
+            continue  # timing-only or empty events
+        text = "".join(s.get("utf8", "") for s in segs).strip()
+        if not text:
+            continue
+        segments.append({
+            "start": ev.get("tStartMs", 0) / 1000.0,
+            "duration": ev.get("dDurationMs", 0) / 1000.0,
+            "text": text,
+        })
+    return segments
