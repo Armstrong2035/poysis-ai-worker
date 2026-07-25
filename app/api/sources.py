@@ -351,51 +351,6 @@ async def import_youtube_playlists(
     return {"status": "imported", **result}
 
 
-# ---------------------------------------------------------------------------
-# TEMPORARY DEBUG — remove after confirming yt-dlp works from Railway's IP.
-# ---------------------------------------------------------------------------
-@router.get("/youtube/debug/transcript")
-async def debug_transcript(
-    video_id: str = Query("yTkFap9Kqdw", description="YouTube video id to test"),
-):
-    """Run both caption backends against one video and report which succeed, so we can
-    see whether yt-dlp beats the datacenter-IP block that kills the library.
-
-    NOTE: temporary and intentionally UNAUTHENTICATED so it's browser-openable — it only
-    fetches a public transcript and exposes no user data. Delete once the answer is known.
-    """
-    import time
-    from datetime import datetime, timezone
-
-    from app.primitives.consolidation.connectors.base import RawSourceItem
-    from app.primitives.consolidation.connectors.youtube import YouTubeConnector
-
-    item = RawSourceItem(
-        source_id=video_id, source_type="youtube", title=video_id,
-        url=f"https://www.youtube.com/watch?v={video_id}",
-        etag=video_id, last_modified=datetime.now(timezone.utc),
-        content_type="document", size_bytes=0, connection_id=None,
-    )
-    conn = YouTubeConnector(channel_ids=[])
-
-    async def _try(coro):
-        t0 = time.monotonic()
-        try:
-            segs = await coro
-            return {"ok": True, "segments": len(segs),
-                    "first_line": (segs[0]["text"] if segs else None),
-                    "elapsed_ms": round((time.monotonic() - t0) * 1000)}
-        except Exception as e:
-            return {"ok": False, "error": str(e)[:300],
-                    "elapsed_ms": round((time.monotonic() - t0) * 1000)}
-
-    return {
-        "video_id": video_id,
-        "ytdlp": await _try(conn._fetch_segments_ytdlp(item)),
-        "library": await _try(conn._fetch_segments_library(item)),
-    }
-
-
 @router.delete("/nango/{provider}")
 async def disconnect_nango_source(
     provider: str,
