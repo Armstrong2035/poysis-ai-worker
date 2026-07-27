@@ -1,10 +1,11 @@
 # Client Integration Guide — `feat/directory-seeding`
 
-What changed on the worker that the frontend needs to know about. Three areas:
+What changed on the worker that the frontend needs to know about. Four areas:
 
 1. **Chat gained a retrieval mode** — a stream-contract change you must handle. ⚠️ Action required.
 2. **YouTube playlists → categories** — two new endpoints to build the "organize by playlist" UI. New feature.
 3. **Transcripts now work from production** — server-side only, no client action.
+4. **`sources` is required on snapshot/discover** — the `["google_drive"]` default is gone. ⚠️ Action required.
 
 ---
 
@@ -147,7 +148,52 @@ Previously YouTube blocked transcript fetching from the datacenter IP, so newly-
 
 ---
 
+## 4. `sources` is now required on snapshot/discover ⚠️
+
+**Short answer: yes — always send `sources`, and list every source you want ingested.**
+
+`POST /consolidation/snapshot` and `POST /consolidation/discover` used to default `sources` to `["google_drive"]` when you omitted it. That default is gone. The field is required and must be non-empty.
+
+### Request
+
+| field | type | meaning |
+|-------|------|---------|
+| `sources` | `string[]` | **Required, non-empty.** `"google_drive"` \| `"gmail"` \| `"recordings"` \| `"youtube"` |
+
+Everything else (`time_window_days`, `doc_limit`, `drive_folder_ids`, `cluster_instructions`) is unchanged and still optional.
+
+**The array is the whole instruction — only what you list gets ingested.** Send what the workspace actually has connected:
+
+```jsonc
+{ "workspace_id": "ws_...", "sources": ["google_drive"] }              // Drive-only workspace
+{ "workspace_id": "ws_...", "sources": ["youtube"] }                   // YouTube-only workspace
+{ "workspace_id": "ws_...", "sources": ["google_drive", "youtube"] }   // both — one snapshot covers them
+```
+
+You don't pass channel IDs or folder IDs for YouTube — the worker resolves connected channels from the workspace itself. `"youtube"` just means "include them".
+
+### Errors you'll now get
+
+| response | cause |
+|---|---|
+| `422` `Field required` | `sources` omitted |
+| `422` `List should have at least 1 item` | `sources: []` |
+| `422` `Input should be 'google_drive', 'gmail', 'recordings' or 'youtube'` | unrecognized value / typo |
+| `400` `sources includes 'youtube' but no YouTube channels are connected…` | asked for YouTube on a workspace with none attached |
+| `401` `No Google token found…` | `"google_drive"` listed, OAuth not completed (unchanged) |
+
+### Why this changed
+
+Omitting `sources` on a YouTube-only workspace previously fell through to the Drive default, hit the Google-token check, and returned `401` **before the job record was created** — so the run left no trace in the jobs table and looked, from the dashboard, like nothing had happened at all. Requiring the field makes the caller's intent explicit and turns that class of failure into an immediate, readable error.
+
+### What to change
+
+Find every call to `/consolidation/snapshot` and `/consolidation/discover` and make sure `sources` is populated from the workspace's connected sources rather than left to the default. If a workspace has both Drive and YouTube connected, send both — a single snapshot ingests them together.
+
+---
+
 ## TL;DR checklist for the frontend
 - [ ] **Chat:** handle the leading `__MODE__` marker (or pin `mode:"synthesis"` to defer). This is the only breaking change.
 - [ ] **Playlists:** build the browse/import UI on the two new `/sources/youtube/playlists…` endpoints; use returned `topic_id`s as categories.
 - [ ] **Transcripts:** nothing — just works now.
+- [ ] **Snapshot/discover:** always send a non-empty `sources` array listing every connected source. Breaking — omitting it is now a 422.

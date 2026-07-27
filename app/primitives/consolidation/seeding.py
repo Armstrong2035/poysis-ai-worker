@@ -87,6 +87,7 @@ async def ingest_and_cluster(
     yt_channels = await db.get_youtube_channels(workspace_id)
     scope = ScopeConfig(
         workspace_id=workspace_id,
+        sources=["youtube"],
         youtube_channel_ids=[channel_id],
         youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         youtube_min_duration_seconds=min_duration_seconds,
