@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 import asyncio
@@ -11,7 +11,7 @@ import traceback
 # A snapshot job whose updated_at is older than this is considered orphaned.
 JOB_STALE_AFTER_SECONDS = 300
 
-from app.primitives.consolidation.scope import ScopeConfig
+from app.primitives.consolidation.scope import ScopeConfig, SourceName
 from app.primitives.consolidation.snapshot import SnapshotRunner
 from app.primitives.consolidation.engine import ConsolidationEngine
 from app.primitives.consolidation.clustering import ClusteringEngine
@@ -30,7 +30,12 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 
 class SnapshotRequest(BaseModel):
     workspace_id: str
-    sources: List[str] = ["google_drive"]
+    # Required, no default. A default here meant a YouTube-only workspace posting
+    # just {workspace_id} silently took the Drive branch and 401'd before any job
+    # row existed, so the run left no trace anywhere. Callers declare what they want.
+    # min_length=1 so an empty list 422s here rather than reaching ScopeConfig's
+    # at_least_one_source check, which would surface as a 500.
+    sources: List[SourceName] = Field(min_length=1)
     time_window_days: int = 0   # 0 = all time (beta: maximize coverage)
     doc_limit: int = 10000  # effectively "all" for beta; iteration loop only kicks in past this
     drive_folder_ids: List[str] = []
@@ -49,6 +54,24 @@ class IngestTranscriptRequest(BaseModel):
     title: str
     published_at: str = ""
     segments: List[TranscriptSegment]
+
+
+async def _youtube_channels_for(req: SnapshotRequest) -> List[dict]:
+    """Channels to ingest for this run — empty unless the caller asked for YouTube.
+
+    Rejects "youtube" with nothing attached rather than letting ScopeConfig raise,
+    so the caller gets a 400 explaining what to fix instead of a 500.
+    """
+    if "youtube" not in req.sources:
+        return []
+
+    channels = await db.get_youtube_channels(req.workspace_id)
+    if not channels:
+        raise HTTPException(
+            status_code=400,
+            detail="sources includes 'youtube' but no YouTube channels are connected to this workspace.",
+        )
+    return channels
 
 
 async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig, job_id: str):
@@ -212,8 +235,7 @@ async def discover(
                 detail="No Google token found for this workspace. Complete OAuth first."
             )
 
-    yt_channels = await db.get_youtube_channels(req.workspace_id)
-    youtube_channel_ids = [c["channel_id"] for c in yt_channels]
+    yt_channels = await _youtube_channels_for(req)
 
     scope = ScopeConfig(
         workspace_id=req.workspace_id,
@@ -222,7 +244,7 @@ async def discover(
         doc_limit=req.doc_limit,
         drive_folder_ids=req.drive_folder_ids,
         google_access_token=access_token,
-        youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_ids=[c["channel_id"] for c in yt_channels],
         youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
     )
 
@@ -273,8 +295,7 @@ async def run_snapshot(
             )
 
     indexed_files = await db.get_indexed_files(workspace_id)
-    yt_channels = await db.get_youtube_channels(workspace_id)
-    youtube_channel_ids = [c["channel_id"] for c in yt_channels]
+    yt_channels = await _youtube_channels_for(req)
     # Honour the per-channel threshold set at seed time. Without this a seeded bot
     # falls back to the 45min app default on every sync after the first and stops
     # ingesting anything new. Lowest wins when a workspace has several channels, so
@@ -292,7 +313,7 @@ async def run_snapshot(
         cluster_instructions=req.cluster_instructions,
         google_access_token=access_token,
         indexed_files=indexed_files,
-        youtube_channel_ids=youtube_channel_ids,
+        youtube_channel_ids=[c["channel_id"] for c in yt_channels],
         youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         **({"youtube_min_duration_seconds": min(yt_min_durations)} if yt_min_durations else {}),
     )

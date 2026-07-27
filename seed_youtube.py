@@ -41,7 +41,7 @@ async def main():
 
     scope = ScopeConfig(
         workspace_id=WORKSPACE_ID,
-        sources=[],
+        sources=["youtube"],
         youtube_channel_ids=channel_ids,
         indexed_files=indexed_files,
         doc_limit=10000,
