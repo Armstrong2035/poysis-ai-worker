@@ -286,6 +286,17 @@ class SnapshotRunner:
 
                 yt_tasks.append(asyncio.create_task(_yt_fetch(item)))
 
+            # Report the denominator, always. Reporting only the total-wipeout case hid
+            # the opposite failure: 29 videos ingested out of 1,030 eligible reads as a
+            # clean sync, because everything filtered out is absent from every counter.
+            if yt_connector.listed_total:
+                mins = self.scope.youtube_min_duration_seconds / 60
+                print(
+                    f"[YouTube] listed {yt_connector.listed_total} video(s), "
+                    f"{yt_connector.skipped_short} below the {mins:.0f}min minimum, "
+                    f"{yt_listed} queued for ingest"
+                )
+
             # A channel whose uploads are all shorter than the threshold lists fine but
             # yields nothing, producing an empty bot that reports a clean sync. Say so.
             if yt_listed == 0 and yt_connector.skipped_short:
