@@ -7,9 +7,9 @@ exactly one place (`app.admin.auth`) rather than re-derived per endpoint.
 Typical use for trying something on your own account before general release:
 
     from app.admin.auth import is_admin
-    if is_admin(user_id):
+    if await is_admin(user_id):
         ...new behaviour...
 """
-from app.admin.auth import is_admin, is_seed_workspace, require_admin
+from app.admin.auth import is_admin, require_admin
 
-__all__ = ["is_admin", "is_seed_workspace", "require_admin"]
+__all__ = ["is_admin", "require_admin"]
