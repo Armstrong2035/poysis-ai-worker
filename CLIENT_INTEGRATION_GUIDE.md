@@ -6,6 +6,7 @@ What changed on the worker that the frontend needs to know about. Four areas:
 2. **YouTube playlists → categories** — two new endpoints to build the "organize by playlist" UI. New feature.
 3. **Transcripts now work from production** — server-side only, no client action.
 4. **`sources` is required on snapshot/discover** — the `["google_drive"]` default is gone. ⚠️ Action required.
+5. **Live progress stream fixed** — reads persisted job state, reports `not_started` instead of hanging. ⚠️ Action required (`EventSource` won't authenticate).
 
 ---
 
@@ -158,9 +159,12 @@ Previously YouTube blocked transcript fetching from the datacenter IP, so newly-
 
 | field | type | meaning |
 |-------|------|---------|
-| `sources` | `string[]` | **Required, non-empty.** `"google_drive"` \| `"gmail"` \| `"recordings"` \| `"youtube"` |
+| `sources` | `string[]` | **Required, non-empty.** `"google_drive"` \| `"youtube"` |
+| `skip_clustering` | `boolean` | Optional, default `false`. Index only — don't build the topic hierarchy. |
 
 Everything else (`time_window_days`, `doc_limit`, `drive_folder_ids`, `cluster_instructions`) is unchanged and still optional.
+
+**`skip_clustering`** is for large backfills. Clustering is the expensive, non-linear tail of a run — UMAP/HDBSCAN plus per-topic semantic analysis over the entire namespace, re-done from scratch every time. On a multi-thousand-video ingest it's worth skipping and running once at the end via `POST /consolidation/cluster/{workspace_id}`. Until you do, the workspace has vectors but no topics, so retrieval works and topic-scoped browsing doesn't.
 
 **The array is the whole instruction — only what you list gets ingested.** Send what the workspace actually has connected:
 
@@ -178,7 +182,7 @@ You don't pass channel IDs or folder IDs for YouTube — the worker resolves con
 |---|---|
 | `422` `Field required` | `sources` omitted |
 | `422` `List should have at least 1 item` | `sources: []` |
-| `422` `Input should be 'google_drive', 'gmail', 'recordings' or 'youtube'` | unrecognized value / typo |
+| `422` `Input should be 'google_drive' or 'youtube'` | unrecognized value / typo |
 | `400` `sources includes 'youtube' but no YouTube channels are connected…` | asked for YouTube on a workspace with none attached |
 | `401` `No Google token found…` | `"google_drive"` listed, OAuth not completed (unchanged) |
 
@@ -192,8 +196,121 @@ Find every call to `/consolidation/snapshot` and `/consolidation/discover` and m
 
 ---
 
+## 5. Live consolidation progress (SSE) ⚠️
+
+`GET /consolidation/snapshot/stream/{workspace_id}` now reads the job row in Postgres instead of in-process memory. It survives a worker redeploy mid-run, and it can no longer sit silent when there's nothing to report.
+
+### The flow
+
+```
+POST /consolidation/snapshot   →  { "status": "started", "job_id": "..." }
+GET  /consolidation/snapshot/stream/{workspace_id}?job_id={job_id}
+```
+
+**Pass `job_id`.** It's optional — without it the stream follows the workspace's *latest* snapshot job, which can briefly report the previous run's result while the new row is being created. With it you always watch the run you just started.
+
+### ⚠️ `EventSource` cannot send the `X-User-ID` header
+
+The existing snippet in `CONSOLIDATION_STREAMING.md` is wrong:
+
+```typescript
+// ✗ Does NOT work — `headers` is silently ignored
+new EventSource(url, { headers: { 'X-User-ID': userId } });
+```
+
+The browser `EventSource` constructor's second argument is `EventSourceInit`, which accepts **only** `{ withCredentials }`. Any `headers` key is dropped, the request arrives without `X-User-ID`, and the endpoint returns **401** before streaming anything. Use a fetch-based SSE client instead:
+
+```typescript
+import { fetchEventSource } from '@microsoft/fetch-event-source';
+
+const ctrl = new AbortController();
+
+await fetchEventSource(
+  `${WORKER_URL}/consolidation/snapshot/stream/${workspaceId}?job_id=${jobId}`,
+  {
+    headers: { 'X-User-ID': userId },
+    signal: ctrl.signal,
+    onmessage(ev) {
+      const data = JSON.parse(ev.data);
+
+      switch (data.status) {
+        case 'not_started':
+          // The POST didn't take. Surface the error — don't show a spinner.
+          showError('Consolidation never started. Check the start request.');
+          ctrl.abort();
+          break;
+        case 'running':
+          updateProgress(data);            // counters below
+          break;
+        case 'clustering':
+          setPhase('Organizing topics…');  // indexing done, building the map
+          break;
+        case 'failed':
+          showError(data.error);
+          ctrl.abort();
+          break;
+        case 'done':
+          if (data.type === 'complete') {  // final event, carries mcp_url
+            showComplete(data.mcp_url);
+            ctrl.abort();
+          }
+          break;
+      }
+    },
+    onerror(err) { ctrl.abort(); throw err; },  // throw = stop retrying
+  },
+);
+```
+
+### Event shapes
+
+Every event is `data: {json}`. Two `type`s:
+
+| `type` | when | notable fields |
+|---|---|---|
+| `progress` | any state change | `status`, counters, `error` |
+| `complete` | once, immediately after the final `progress` | `mcp_url` + everything from the final state |
+
+`status` is the field to switch on:
+
+| `status` | meaning |
+|---|---|
+| `not_started` | **No job exists.** Sent immediately, then the stream closes. Your POST failed — read its response. |
+| `running` | Indexing. Counters update as batches flush. |
+| `clustering` | Indexing finished; building the topic hierarchy. Counters are final. |
+| `done` | Finished. A `type: "complete"` event follows with `mcp_url`. |
+| `failed` | Run failed; `error` holds the reason. |
+
+Counters on `running` / `clustering` / `done`:
+
+| field | meaning |
+|---|---|
+| `docs_processed` | documents successfully indexed |
+| `docs_skipped` | unchanged since last run (already indexed) |
+| `docs_orphaned` | deliberately skipped — oversized or unparseable |
+| `vectors_indexed` | chunks embedded and stored |
+
+On `done` you also get `leaf_topics`, `total_topics`, `hierarchy_depth`, `iterations`, `errors` (up to 50 per-document failures) with `error_count`, and `clustering`:
+
+| `clustering` | meaning |
+|---|---|
+| `done` | topic hierarchy rebuilt |
+| `skipped` | nothing changed, so no re-cluster was needed |
+| `skipped_by_request` | you passed `skip_clustering: true` — topics are stale until you run `POST /consolidation/cluster/{workspace_id}` |
+
+### Two behaviours to code for
+
+**Keepalive frames.** During long fetch phases that emit no progress, the server sends SSE comment lines (`: keepalive`) about every 15s to stop proxies dropping the connection. `EventSource` and `fetchEventSource` both ignore comment frames — you'll never see them in `onmessage`. Just don't treat silence between events as a hang.
+
+**`not_started` is a real answer.** Previously a failed POST left the stream open and completely silent for 30 minutes, so "starting…" spun forever. Now you get an immediate answer and the connection closes. Show the error rather than a spinner.
+
+**Duplicate-free by design:** events fire only when state *changes*, so an unchanged poll emits nothing. The stream closes on its own at `done`, `failed`, or `not_started`, and caps at 30 minutes.
+
+---
+
 ## TL;DR checklist for the frontend
 - [ ] **Chat:** handle the leading `__MODE__` marker (or pin `mode:"synthesis"` to defer). This is the only breaking change.
 - [ ] **Playlists:** build the browse/import UI on the two new `/sources/youtube/playlists…` endpoints; use returned `topic_id`s as categories.
 - [ ] **Transcripts:** nothing — just works now.
 - [ ] **Snapshot/discover:** always send a non-empty `sources` array listing every connected source. Breaking — omitting it is now a 422.
+- [ ] **Progress stream:** swap `EventSource` for a fetch-based SSE client (it can't send `X-User-ID` — you're getting 401s today), pass `?job_id=`, and handle `status: "not_started"` as an error instead of a spinner.

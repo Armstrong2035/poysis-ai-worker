@@ -195,6 +195,20 @@ data: {"type": "complete", "mcp_url": "https://...", "status": "done", ...}
 
 Your JavaScript code receives these as `message` events and parses the JSON.
 
+### Two additions
+
+**`status: "not_started"`** — sent immediately if no snapshot job exists for the workspace, then the stream closes. Previously this case produced an open connection with *zero bytes* for 30 minutes, so a failed `POST /consolidation/snapshot` was indistinguishable from a slow one. Treat it as "the start request didn't take — check the POST response."
+
+**`?job_id=` (recommended)** — pass the `job_id` returned by `POST /consolidation/snapshot`:
+
+```
+GET /consolidation/snapshot/stream/{workspace_id}?job_id={job_id}
+```
+
+Without it the stream follows the workspace's *latest* snapshot job, which can briefly report the previous run's result while the new row is being created. With it you always watch the run you started. Omitting it keeps the old behaviour.
+
+You may also see lines beginning with `:` (e.g. `: keepalive`) roughly every 15s during long phases that emit no progress. These are SSE comment frames that stop proxies dropping an idle connection; `EventSource` ignores them automatically.
+
 ## Edge Cases
 
 ### What if the user closes the tab?

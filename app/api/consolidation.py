@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import os
+import time
 import traceback
 
 # A snapshot job whose updated_at is older than this is considered orphaned.
@@ -40,6 +41,11 @@ class SnapshotRequest(BaseModel):
     doc_limit: int = 10000  # effectively "all" for beta; iteration loop only kicks in past this
     drive_folder_ids: List[str] = []
     cluster_instructions: List[dict] = []
+    # Index only, don't build the topic hierarchy. Clustering is the expensive,
+    # non-linear tail of a run (UMAP/HDBSCAN + per-topic semantic analysis over
+    # the whole namespace), so a large backfill can skip it and cluster once at
+    # the end via POST /consolidation/cluster/{workspace_id}.
+    skip_clustering: bool = False
 
 
 class TranscriptSegment(BaseModel):
@@ -74,8 +80,14 @@ async def _youtube_channels_for(req: SnapshotRequest) -> List[dict]:
     return channels
 
 
-async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig, job_id: str):
-    """Background job: consolidate and cluster documents."""
+async def _run_snapshot_job(
+    workspace_id: str,
+    user_id: str,
+    scope: ScopeConfig,
+    job_id: str,
+    skip_clustering: bool = False,
+):
+    """Background job: consolidate and (unless skipped) cluster documents."""
     _jobs[workspace_id] = {"status": "running", "vectors_indexed": 0, "docs_processed": 0, "errors": []}
     total_vectors = 0
     total_docs = 0
@@ -91,15 +103,18 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
             print(f"[Snapshot] Iteration {iteration} for workspace '{workspace_id}'")
 
             def _on_progress(p: dict):
-                _jobs[workspace_id].update({
+                snapshot = {
+                    "status": "running",
                     "vectors_indexed": total_vectors + p["vectors_indexed"],
                     "docs_processed": total_docs + p["docs_processed"],
                     "docs_skipped": total_skipped + p["docs_skipped"],
                     "docs_orphaned": total_orphaned + p["docs_orphaned"],
-                })
-                # Heartbeat the DB row so stale-running detection knows we're alive.
-                # Fire-and-forget — failure to touch is non-fatal.
-                asyncio.create_task(db.touch_job(job_id))
+                }
+                _jobs[workspace_id].update(snapshot)
+                # Writes progress for the SSE stream to read *and* heartbeats the row
+                # for stale-running detection — one write serves both.
+                # Fire-and-forget: failure to record is non-fatal to the run.
+                asyncio.create_task(db.record_job_progress(job_id, snapshot))
 
             result = await engine.run_snapshot(current_scope, progress_callback=_on_progress)
 
@@ -125,7 +140,12 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
         # same docs (UMAP/HDBSCAN + semantic analysis + full topic/story rebuild)
         # even when nothing new was ingested or removed.
         corpus_changed = total_docs > 0 or total_orphaned > 0
-        if corpus_changed:
+        if skip_clustering:
+            # Distinct from "skipped" so the client can tell "you asked me not to"
+            # apart from "nothing changed". Run it later with POST /cluster/{ws}.
+            print(f"[Snapshot] skip_clustering set for '{workspace_id}' — indexing only")
+            cluster_result = {"status": "skipped_by_request"}
+        elif corpus_changed:
             # Update job: moving to clustering phase
             status_update = {
                 "status": "clustering",
@@ -153,6 +173,11 @@ async def _run_snapshot_job(workspace_id: str, user_id: str, scope: ScopeConfig,
             "docs_processed": total_docs,
             "docs_skipped": total_skipped,
             "docs_orphaned": total_orphaned,
+            # Per-document failures don't fail the run, but dropping them entirely
+            # let a run that enumerated a fraction of a channel report a clean
+            # "done". Cap the payload — a bad run can produce thousands.
+            "errors": all_errors[:50],
+            "error_count": len(all_errors),
             "iterations": iteration,
             "leaf_topics": cluster_result.get("leaf_topics", 0),
             "total_topics": cluster_result.get("total_topics", 0),
@@ -324,8 +349,15 @@ async def run_snapshot(
         raise HTTPException(status_code=500, detail="Failed to create job record")
 
     # Start background task with job tracking
-    background_tasks.add_task(_run_snapshot_job, workspace_id, user_id, scope, job_id)
-    return {"status": "started", "workspace_id": workspace_id, "job_id": job_id}
+    background_tasks.add_task(
+        _run_snapshot_job, workspace_id, user_id, scope, job_id, req.skip_clustering
+    )
+    return {
+        "status": "started",
+        "workspace_id": workspace_id,
+        "job_id": job_id,
+        "skip_clustering": req.skip_clustering,
+    }
 
 
 @router.get("/snapshot/status/{workspace_id}")
@@ -372,57 +404,91 @@ async def indexed_count(workspace_id: str, user_id: str = Depends(get_user_id)):
     }
 
 
+def _job_event_state(job: Optional[dict]) -> Dict[str, Any]:
+    """Flatten a consolidation_jobs row into the flat shape stream clients expect.
+
+    The row splits truth across two columns: `status` is authoritative for
+    terminal states, while `result` carries the counters and the mid-run
+    "clustering" phase. Merge them so the client sees one `status` field.
+    """
+    if not job:
+        return {"status": "not_started"}
+    if job.get("status") == "failed":
+        return {"status": "failed", "error": job.get("error")}
+
+    state = dict(job.get("result") or {})
+    if job.get("status") == "done":
+        state["status"] = "done"
+    else:
+        # Mid-run: prefer the phase recorded in `result` ("running"/"clustering").
+        # A row created but not yet reporting has no result at all.
+        state.setdefault("status", "running")
+    return state
+
+
 @router.get("/snapshot/stream/{workspace_id}")
-async def snapshot_stream(workspace_id: str, user_id: str = Depends(get_user_id)):
+async def snapshot_stream(
+    workspace_id: str,
+    job_id: Optional[str] = None,
+    user_id: str = Depends(get_user_id),
+):
     """
     Server-Sent Events (SSE) stream of consolidation progress.
 
-    Frontend opens this connection and receives real-time updates as documents
-    are indexed, clustered, and organized. Connection stays open until the job
-    completes or an error occurs.
+    Reads the consolidation_jobs row rather than in-process state, so the stream
+    is correct after a redeploy mid-run and across replicas.
 
-    Returns a stream of newline-delimited JSON events.
+    Pass the `job_id` returned by POST /consolidation/snapshot to watch that exact
+    run. Without it the stream follows the workspace's latest snapshot job, which
+    can briefly report the *previous* run while the new row is being created.
     """
     await verify_workspace_ownership(workspace_id, user_id)
 
     async def event_stream():
-        """Generator that yields SSE-formatted events."""
-        last_state = {}
-        check_interval = 0.5  # Check every 500ms
-        max_checks = 3600  # 30 minutes max
-        checks = 0
+        POLL_INTERVAL = 1.0
+        KEEPALIVE_INTERVAL = 15.0
+        MAX_DURATION = 1800.0  # 30 minutes, as before
+        # The client typically opens this immediately after POSTing, so the row may
+        # not exist for a beat. Report "not_started" right away but keep watching
+        # briefly, so a genuine race resolves and a failed POST still terminates.
+        NOT_STARTED_GRACE = 5.0
 
-        while checks < max_checks:
-            checks += 1
+        started = time.monotonic()
+        last_state = None
+        last_send = started
 
-            # Get current job state
-            current_state = _jobs.get(workspace_id, {})
+        while time.monotonic() - started < MAX_DURATION:
+            if job_id:
+                job = await db.get_job(job_id)
+                # Never let a job_id from one workspace stream into another.
+                if job and job.get("workspace_id") != workspace_id:
+                    job = None
+            else:
+                job = await db.get_latest_job(workspace_id, job_type="snapshot")
 
-            # If state changed, emit event
-            if current_state != last_state:
-                # Send progress event
-                event_data = {
-                    "type": "progress",
-                    "timestamp": asyncio.get_event_loop().time(),
-                    **current_state,  # Include all job metrics
-                }
-                yield f"data: {json.dumps(event_data)}\n\n"
-                last_state = current_state.copy()
+            state = _job_event_state(job)
 
-            # Check if job is done
-            if current_state.get("status") in ["done", "failed"]:
-                # If done, add MCP URL
-                if current_state.get("status") == "done":
-                    final_event = {
-                        "type": "complete",
-                        "mcp_url": _generate_mcp_url(workspace_id),
-                        **current_state,
-                    }
-                    yield f"data: {json.dumps(final_event)}\n\n"
-                break
+            if state != last_state:
+                yield f"data: {json.dumps({'type': 'progress', 'timestamp': time.time(), **state})}\n\n"
+                last_state = state
+                last_send = time.monotonic()
 
-            # Wait before checking again
-            await asyncio.sleep(check_interval)
+            status = state.get("status")
+            if status == "done":
+                yield f"data: {json.dumps({'type': 'complete', 'mcp_url': _generate_mcp_url(workspace_id), **state})}\n\n"
+                return
+            if status == "failed":
+                return
+            if status == "not_started" and time.monotonic() - started >= NOT_STARTED_GRACE:
+                return
+
+            # Comment frame: keeps proxies from dropping an idle connection during
+            # long fetch phases that emit no progress. Ignored by EventSource.
+            if time.monotonic() - last_send >= KEEPALIVE_INTERVAL:
+                yield ": keepalive\n\n"
+                last_send = time.monotonic()
+
+            await asyncio.sleep(POLL_INTERVAL)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
