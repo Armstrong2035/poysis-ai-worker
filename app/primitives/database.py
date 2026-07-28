@@ -537,6 +537,31 @@ class DatabaseService:
             return []
 
     # ============================================================================
+    # Accounts
+    # ============================================================================
+
+    async def is_admin_account(self, user_id: str) -> bool:
+        """True if this account is Poysis staff (profiles.is_admin).
+
+        Fails closed on any error or missing row: an unreachable database must not
+        silently promote a caller. profiles has no write policy, so the flag is
+        service-role-only and cannot be self-set.
+        """
+        if not self.client or not user_id:
+            return False
+        try:
+            res = (
+                self.client.table("profiles")
+                .select("is_admin")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return bool(res.data and res.data[0].get("is_admin"))
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to read profile for {user_id}: {e}")
+            return False
+
+    # ============================================================================
     # Job Tracking (persistent state across deploys)
     # ============================================================================
 
@@ -565,10 +590,13 @@ class DatabaseService:
                 "status": status,
                 "updated_at": "now()"
             }
+            # Persist result whenever the caller supplies one, not only on "done".
+            # The mid-run "clustering" update passes a result and used to have it
+            # silently dropped, so the row never showed the clustering phase.
+            if result:
+                update_data["result"] = result
             if status == "done":
                 update_data["completed_at"] = "now()"
-                if result:
-                    update_data["result"] = result
             if error:
                 update_data["error"] = error
                 if status != "running":
@@ -591,17 +619,23 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to fetch job: {e}")
             return None
 
-    async def touch_job(self, job_id: str) -> bool:
-        """Bump updated_at so stale-running detection knows the job is alive."""
+    async def record_job_progress(self, job_id: str, progress: dict) -> bool:
+        """Persist in-flight progress, and bump updated_at as the liveness heartbeat.
+
+        Replaces the old touch-only heartbeat: the write was already happening on
+        every batch, so carrying the counters costs nothing extra and makes the row
+        — not process memory — the thing the SSE stream reads. That survives a
+        redeploy mid-run and stays correct if the worker is scaled past one replica.
+        """
         if not self.client:
             return False
         try:
             self.client.table("consolidation_jobs").update(
-                {"updated_at": "now()"}
+                {"result": progress, "updated_at": "now()"}
             ).eq("id", job_id).execute()
             return True
         except Exception as e:
-            print(f"[DATABASE ERROR] Failed to touch job: {e}")
+            print(f"[DATABASE ERROR] Failed to record job progress: {e}")
             return False
 
     async def reap_stale_jobs(self, stale_after_seconds: int = 300) -> int:

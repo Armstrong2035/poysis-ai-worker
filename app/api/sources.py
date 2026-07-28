@@ -214,8 +214,9 @@ async def youtube_connect(
     channel_url accepts a raw channel ID, a youtube.com URL (/channel/, /@handle,
     /c/, /user/), or a bare @handle — resolved server-side to the actual channel ID.
 
-    If workspace_id is the configured SEED_WORKSPACE_ID, this seeds a brand-new
-    directory bot instead — see _seed_directory_bot.
+    Internal (admin) accounts always seed a brand-new directory bot instead of
+    attaching to workspace_id — one bot is one workspace is one channel is one
+    vector namespace. See _seed_directory_bot.
     """
     workspace = await db.get_workspace(workspace_id)
     if not workspace or workspace.get("user_id") != user_id:
@@ -225,19 +226,16 @@ async def youtube_connect(
     if not api_key:
         raise HTTPException(status_code=500, detail="YouTube integration is not configured")
 
-    from app.admin.auth import is_admin, is_seed_workspace
+    from app.admin.auth import is_admin
     from app.primitives.consolidation import seeding
 
-    if is_seed_workspace(workspace_id):
-        # Refuse rather than fall through. Falling through would attach the channel
-        # to the seeder workspace itself, blending it with every other channel added
-        # there — the one irreversible mistake this flow exists to prevent. A
-        # misconfigured POYSIS_ADMIN_USER_IDS must fail loudly, not quietly corrupt.
-        if not is_admin(user_id):
-            raise HTTPException(
-                status_code=403,
-                detail="This workspace seeds directory bots and is admin-only.",
-            )
+    # The account decides, not the target workspace. Directory seeding needs each
+    # channel isolated in its own namespace; attaching a second channel to an
+    # existing workspace blends the two irreversibly, because chunk metadata
+    # records the video id and the namespace is derived from workspace_id alone.
+    # Admin-ness fails closed (see app/admin/auth.py), so a database blip
+    # downgrades a seed into an ordinary attach rather than the reverse.
+    if await is_admin(user_id):
         return await _seed_directory_bot(
             background_tasks,
             user_id,

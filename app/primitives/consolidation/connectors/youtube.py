@@ -38,6 +38,9 @@ class YouTubeConnector(BaseConnector):
         # videos but yields none is indistinguishable from an empty channel unless
         # the caller can see this — see SnapshotRunner, which turns it into an error.
         self.skipped_short = 0
+        # Videos seen on the channel before any filtering, so callers can report
+        # "29 of 1030" rather than a bare 29 with no denominator.
+        self.listed_total = 0
 
     async def list_items(self, scope: ScopeConfig) -> AsyncIterator[RawSourceItem]:
         if not self.api_key:
@@ -48,33 +51,45 @@ class YouTubeConnector(BaseConnector):
 
         async with httpx.AsyncClient(timeout=30) as client:
             for channel_id in self.channel_ids:
+                # Enumerate via the channel's uploads playlist, not search.list.
+                # search.list stops paginating at ~500 results however many videos
+                # the channel has — it silently capped a 1,600-video channel — and
+                # costs 100 quota units per call against a 10,000/day budget.
+                # playlistItems pages the full catalogue at 1 unit per call.
+                uploads_playlist_id = await _uploads_playlist_id(client, channel_id, self.api_key)
+                if not uploads_playlist_id:
+                    raise RuntimeError(f"Channel {channel_id} has no uploads playlist")
+
                 page_token: str | None = None
                 while fetched < limit:
-                    batch = min(50, int(limit - fetched)) if limit != float("inf") else 50
                     params: dict = {
-                        "part": "id,snippet",
-                        "channelId": channel_id,
-                        "type": "video",
-                        "maxResults": batch,
+                        "part": "snippet,contentDetails",
+                        "playlistId": uploads_playlist_id,
+                        "maxResults": 50,
                         "key": self.api_key,
                     }
                     if page_token:
                         params["pageToken"] = page_token
 
-                    data = await _get_with_retry(client, f"{_YT_API}/search", params)
+                    data = await _get_with_retry(client, f"{_YT_API}/playlistItems", params)
 
                     # Collect video IDs and metadata from this page
                     page_items = []
                     for entry in data.get("items", []):
-                        video_id = entry.get("id", {}).get("videoId")
-                        if not video_id:
-                            continue
+                        details = entry.get("contentDetails", {})
                         snippet = entry.get("snippet", {})
+                        video_id = details.get("videoId") or snippet.get("resourceId", {}).get("videoId")
+                        if not video_id:
+                            continue  # deleted or private entry
                         page_items.append({
                             "video_id": video_id,
+                            # playlistItems dates the *addition*; videoPublishedAt is
+                            # the upload date, and it is what etag/last_modified mean.
+                            "published_at": details.get("videoPublishedAt")
+                            or snippet.get("publishedAt", ""),
                             "title": snippet.get("title", "Untitled"),
-                            "published_at": snippet.get("publishedAt", ""),
                         })
+                    self.listed_total += len(page_items)
 
                     # Batch-fetch durations (1 quota unit per 50 videos)
                     durations = await _fetch_durations(
@@ -282,6 +297,21 @@ async def list_playlist_videos(playlist_id: str, api_key: str) -> List[Dict]:
             if not page_token:
                 break
     return videos
+
+
+async def _uploads_playlist_id(
+    client: httpx.AsyncClient, channel_id: str, api_key: str
+) -> Optional[str]:
+    """The channel's auto-generated uploads playlist — every public video, paginable."""
+    data = await _get_with_retry(
+        client,
+        f"{_YT_API}/channels",
+        {"part": "contentDetails", "id": channel_id, "key": api_key},
+    )
+    items = data.get("items", [])
+    if not items:
+        return None
+    return items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str, params: dict, retries: int = 3) -> dict:

@@ -4,7 +4,13 @@ from pydantic import BaseModel, field_validator, model_validator
 # The vocabulary callers use to declare what a run should ingest. Add new sources
 # here and the API contract picks them up automatically — SnapshotRequest shares
 # this type, so there is one list to keep current, not two.
-SourceName = Literal["google_drive", "gmail", "recordings", "youtube"]
+#
+# Only list what the runner actually handles. "gmail" and "recordings" lived here
+# as placeholders for planned connectors that were never built, which made
+# sources=["gmail"] a 200 followed by a run that indexed nothing and reported
+# success. A value here is a promise the pipeline keeps; add one when its
+# connector lands, not before.
+SourceName = Literal["google_drive", "youtube"]
 
 
 class ScopeConfig(BaseModel):
@@ -13,9 +19,6 @@ class ScopeConfig(BaseModel):
     time_window_days: int = 0           # 0 = all time (beta: maximize coverage)
     doc_limit: int = 500                # -1 = unlimited
     drive_folder_ids: List[str] = []    # [] = all accessible folders
-    gmail_labels: List[str] = ["INBOX"]
-    recording_channel_ids: List[str] = []
-    sync_frequency: Literal["manual", "weekly", "daily"] = "manual"
     google_access_token: Optional[str] = None
     google_refresh_token: Optional[str] = None
     cluster_instructions: List[dict] = []

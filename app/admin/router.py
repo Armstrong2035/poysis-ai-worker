@@ -1,8 +1,8 @@
 """Admin-only HTTP surface, mounted at /admin.
 
 Read-only diagnostics only — no frontend work needed, curl or a browser is enough.
-Seeding is deliberately NOT exposed here: it is triggered by connecting a channel
-to the seeder workspace through the normal UI (see app/api/sources.py), so there is
+Seeding is deliberately NOT exposed here: it is triggered by an admin account
+connecting a channel through the normal UI (see app/api/sources.py), so there is
 one write path rather than two that can drift.
 
 Every route depends on `require_admin`, so adding a route here is admin-gated by
@@ -10,7 +10,7 @@ construction rather than by remembering to add a check.
 """
 from fastapi import APIRouter, Depends
 
-from app.admin.auth import require_admin, seed_workspace_id
+from app.admin.auth import require_admin
 from app.primitives.consolidation import seeding
 from app.primitives.database import DatabaseService
 
@@ -20,12 +20,12 @@ db = DatabaseService()
 
 @router.get("/whoami")
 async def whoami(user_id: str = Depends(require_admin)):
-    """Confirm admin config is wired up. Reaching this at all means you're an admin."""
+    """Confirm the admin flag is wired up. Reaching this at all means you're an admin."""
     return {
         "user_id": user_id,
         "is_admin": True,
-        "seed_workspace_id": seed_workspace_id(),
-        "seed_mode_active": seed_workspace_id() is not None,
+        # Every channel you connect seeds its own workspace/namespace.
+        "seeds_own_namespace": True,
         "default_seed_min_duration_seconds": seeding.DEFAULT_SEED_MIN_DURATION,
     }
 

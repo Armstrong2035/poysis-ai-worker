@@ -326,7 +326,7 @@ flowchart TD
 ### `ScopeConfig`
 ```
 workspace_id: str
-sources: List["google_drive" | "gmail" | "recordings"]
+sources: List["google_drive" | "youtube"]
 time_window_days: int = 90          # 0 = all time
 doc_limit: int = 500                # -1 = unlimited
 drive_folder_ids: List[str] = []    # [] = all folders
@@ -432,7 +432,7 @@ _jobs: Dict[str, Dict] = {
 
 ### 5. Gmail connector
 **Scope**: Equivalent of `GoogleDriveConnector` for Gmail. Uses Gmail API to list threads within `time_window_days`, fetch message bodies, strip HTML, process into chunks via `DocumentProcessor`.
-**Plumbing already exists**: `ScopeConfig` already has `gmail_labels: List[str]` and `"gmail"` is a valid source type.
+**No plumbing yet**: `gmail_labels` and the `"gmail"` source value were removed from `ScopeConfig` — they were placeholders with no connector behind them, so declaring `sources: ["gmail"]` returned 200 and indexed nothing. Add the value back to `SourceName` as part of building the connector, not ahead of it.
 
 ### 6. Persistent job status
 **Problem**: `_jobs` dict is in-memory. A Railway restart during a long snapshot makes the status unreachable and blocks the 409 guard until the new instance gets a fresh request.
@@ -442,7 +442,7 @@ _jobs: Dict[str, Dict] = {
 **Scope**: Track Gemini embedding API token usage and Pinecone upsert counts at every pipeline step. Surface in the status endpoint and/or a separate analytics endpoint. Needed for cost attribution per workspace.
 
 ### 8. Audio pipeline
-**Explicitly deferred.** Would process meeting recordings into transcripts (via Whisper or similar), then chunk transcripts and index into the same consolidated namespace. `ScopeConfig` already has `recording_channel_ids`.
+**Explicitly deferred.** Would process meeting recordings into transcripts (via Whisper or similar), then chunk transcripts and index into the same consolidated namespace. The unused `recording_channel_ids` field and `"recordings"` source value have been removed from `ScopeConfig`; reintroduce them with the implementation.
 
 ### 9. Force re-index flag
 **Scope**: `SnapshotRequest` flag `force: bool = False`. When `True`, bypasses `indexed_files` check and re-processes all files regardless of etag. Useful for debugging or when the embedding model changes.
