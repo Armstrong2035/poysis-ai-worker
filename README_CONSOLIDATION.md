@@ -55,9 +55,9 @@ curl -X POST http://localhost:8000/consolidation/snapshot \
 ```
 
 `sources` is **required** and must be non-empty. Valid values: `google_drive`,
-`gmail`, `recordings`, `youtube` — anything else is a 422. Only what you list gets
-ingested, so a workspace with both Drive and a YouTube channel needs
-`["google_drive", "youtube"]`; listing `youtube` with no channel connected is a 400.
+`youtube` — anything else is a 422. Only what you list gets ingested, so a
+workspace with both Drive and a YouTube channel needs `["google_drive",
+"youtube"]`; listing `youtube` with no channel connected is a 400.
 
 This kicks off an async job that:
 - Connects to user's Google Drive

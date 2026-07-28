@@ -379,8 +379,9 @@ Where the immediate work sits in the larger vision:
 
 - **Three expansion axes.** Growth happens along three independent axes:
   1. **Sources** — more connectors beyond Drive (Notion, Gmail, Slack, …, 12+). This is what
-     makes Priority (d)/Nango strategically important. `ScopeConfig` already anticipates
-     `gmail` and `recordings` sources.
+     makes Priority (d)/Nango strategically important. Each new source adds a value to
+     `SourceName` *when its connector ships* — the model no longer carries placeholder
+     source names ahead of the code that serves them.
   2. **File types** — more formats per source (Priority (e)/pptx is the first crack here;
      audio/video transcription, images, etc. follow).
   3. **New ways to use the data** — more *surfaces* on top of the same index: MCP for
