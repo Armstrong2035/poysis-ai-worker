@@ -102,7 +102,10 @@ class KnowledgeEngine:
         SUB_BATCH = 200
         embeddings: List[List[float]] = []
         for i in range(0, len(texts), SUB_BATCH):
-            sub = texts[i:i + SUB_BATCH]
+            # Guard: no single input may exceed the embedding model's 8192-token limit —
+            # one over-long text 400s the whole batch and aborts the job. Truncation is a
+            # last resort; the transcript merger already keeps chunks well under budget.
+            sub = [_truncate_to_tokens(t, _MAX_EMBED_TOKENS) for t in texts[i:i + SUB_BATCH]]
             for attempt in range(5):
                 try:
                     result = await self.embed_model.aget_text_embedding_batch(sub, show_progress=False)
@@ -143,7 +146,9 @@ class KnowledgeEngine:
         print(f"[STEP 3a EMBED] done — {time.perf_counter() - t0:.1f}s")
 
         topic_groups = _find_topic_groups(chunks, block_embeddings, threshold=topic_threshold)
-        merged = [_merge_transcript_chunks(g) for g in topic_groups]
+        merged = []
+        for g in topic_groups:
+            merged.extend(_merge_transcript_chunks_bounded(g))
         print(f"[TOPIC SEG   ] {len(chunks)} pre-chunks → {len(merged)} topic chunks")
 
         # --- Pass 2: embed merged topic chunks for storage ---
@@ -340,3 +345,73 @@ def _merge_transcript_chunks(group: list) -> Any:
             "end_seconds": last.extra_metadata.get("start_seconds", 0),
         },
     )
+
+
+# text-embedding-3 rejects any input over 8192 tokens; stay under it with margin.
+_MAX_EMBED_TOKENS = 8000
+# Target size when merging a transcript topic group. A long single-topic stretch
+# (e.g. 30 uninterrupted minutes) would otherwise merge into one oversized chunk the
+# embedding API rejects — so we split the group to keep each chunk under this budget,
+# comfortably below the hard limit.
+_MERGE_TOKEN_BUDGET = 6000
+
+_ENCODER = None
+_ENCODER_TRIED = False
+
+
+def _get_encoder():
+    """cl100k_base tokenizer (what text-embedding-3 uses), or None if tiktoken is absent."""
+    global _ENCODER, _ENCODER_TRIED
+    if not _ENCODER_TRIED:
+        _ENCODER_TRIED = True
+        try:
+            import tiktoken
+            _ENCODER = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _ENCODER = None
+    return _ENCODER
+
+
+def _token_len(text: str) -> int:
+    enc = _get_encoder()
+    if enc is not None:
+        return len(enc.encode(text))
+    return len(text) // 4  # ~4 chars/token fallback
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Trim text to at most max_tokens. Last-resort guard so one over-long input can't
+    400 the whole embedding batch and abort the job."""
+    enc = _get_encoder()
+    if enc is not None:
+        toks = enc.encode(text)
+        if len(toks) > max_tokens:
+            print(f"[EMBED] truncating over-long input: {len(toks)} → {max_tokens} tokens")
+            return enc.decode(toks[:max_tokens])
+        return text
+    max_chars = max_tokens * 4
+    if len(text) > max_chars:
+        print(f"[EMBED] truncating over-long input: {len(text)} chars → {max_chars}")
+        return text[:max_chars]
+    return text
+
+
+def _merge_transcript_chunks_bounded(group: list, token_budget: int = _MERGE_TOKEN_BUDGET) -> list:
+    """Merge a topic group into one or more ProcessedChunks, each within the token budget.
+
+    Splits a long single-topic run into consecutive chunks (preserving timestamps) instead
+    of producing one chunk that overflows the embedding limit. Content is never dropped.
+    """
+    out = []
+    sub: list = []
+    tokens = 0
+    for c in group:
+        t = _token_len(c.text)
+        if sub and tokens + t > token_budget:
+            out.append(_merge_transcript_chunks(sub))
+            sub, tokens = [], 0
+        sub.append(c)
+        tokens += t
+    if sub:
+        out.append(_merge_transcript_chunks(sub))
+    return out
