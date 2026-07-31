@@ -26,7 +26,8 @@ The counters a job reports as it works:
 | `docs_processed` | Videos handled so far. |
 | `vectors_indexed` | Chunks (passages) created so far. |
 | `docs_skipped` | Videos passed over (too short, or already done in a previous run). |
-| `docs_orphaned` | Videos that failed to process. Usually small; watch if it's large. |
+| `docs_orphaned` | Videos already known to be unusable, skipped without retrying. |
+| `docs_failed` | Videos that failed *on this run* (usually no captions). Rising `docs_failed` with a flat `docs_processed` still means the job is alive — it's working, just not finding anything usable. |
 
 ---
 
@@ -56,7 +57,7 @@ const { data: job } = await supabase
 **What each field tells you:**
 - `status` — `"running"` | `"done"` | `"failed"`. (If no row at all → nothing has started yet; show "Not started.")
 - `result.docs_processed` / `result.vectors_indexed` — the live counters to display.
-- `updated_at` — **freshness / stall check.** If `status` is `"running"` but `updated_at` is more than ~2–3 minutes ago, it may be stuck — show a gentle "taking longer than usual" rather than a frozen bar.
+- `updated_at` — **freshness / stall check.** A run heartbeats on every document it resolves, success or failure, and at most once every 5 seconds. YouTube fetches are deliberately serial with a 3s throttle, and a video that gets rate-limited burns up to ~3.5 minutes of backoff before giving up — so the honest stall threshold is **~5 minutes**, not 2–3. Past that, show a gentle "taking longer than usual" rather than a frozen bar.
 
 **What to show:**
 - `running` → spinner + `Processing… {docs_processed} videos, {vectors_indexed} passages so far.`
