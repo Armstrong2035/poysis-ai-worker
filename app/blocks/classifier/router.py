@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 
 router = APIRouter(tags=["categorization"])
 
@@ -19,7 +19,7 @@ async def classify_intent(request: ClassifyRequest):
     No if/else. No keywords. Pure semantic proximity.
     """
     try:
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
         best_label = None
         best_score = 0.0
         scores = {}

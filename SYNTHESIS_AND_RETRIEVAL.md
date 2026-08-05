@@ -239,6 +239,12 @@ The endpoint returns one streamed response. It serves both modes on the same cha
 - **Synthesis mode.** The system streams the answer text first. Then it sends the sources
   as `__SOURCES__`. Then it sends the meta block as `__META__`. The meta block holds the
   scale, the themes, and one grounded key quote.
+  - With `sources_first: true` on the request, `__SOURCES__` leads instead, followed by a
+    blank line and then the answer text; `__META__` still comes last. Nothing renders
+    before retrieval either way, but the answer takes seconds longer to generate — so
+    leading with the sources lets the client paint the cards at once and stream the prose
+    into place. It is opt-in because it changes the byte order: a client that expects
+    prose first would print the marker as text.
 - **Retrieval mode.** The system sends `__MODE__` first, so the client shows a source list
   and not a typing sign. Then it sends the sources and a smaller meta block. Retrieval mode
   makes no model call for prose. So it is faster and cheaper.

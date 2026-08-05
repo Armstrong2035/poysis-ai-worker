@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 
 router = APIRouter(tags=["recommendation"])
 
@@ -20,7 +20,7 @@ async def recommend(request: RecommendRequest):
     Use case: "Users who read X also liked..." or "Similar products."
     """
     try:
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
 
         # Fetch more than needed so we can filter
         raw_results = await engine.fetch_raw(

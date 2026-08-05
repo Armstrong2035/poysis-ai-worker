@@ -87,6 +87,51 @@ function parseChatStream(buf: string) {
 
 ---
 
+## 1b. Chat: conversation memory + sources-first streaming
+
+Two new optional `/chat` fields. Both are **opt-in — omit them and nothing changes.**
+
+### `history` — makes follow-ups work
+
+`/chat` was stateless: every turn was an independent query. "Tell me more about that" retrieved nothing useful, because the subject lived in the previous turn.
+
+Send the transcript and it resolves:
+
+| field | type | meaning |
+|-------|------|---------|
+| `history` | array | `[{ role: "user" \| "assistant", content: string }]`, oldest → newest, **excluding** the current `query`. |
+
+```jsonc
+{
+  "workspace_id": "ws_…",
+  "query": "what about doubt?",
+  "history": [
+    { "role": "user",      "content": "what does he teach about faith?" },
+    { "role": "assistant", "content": "He frames faith as trust under pressure…" }
+  ]
+}
+```
+
+- **The client owns the transcript.** The server stores nothing — keep it in component state and send the window each turn.
+- Server caps at the **last 6 turns**; assistant turns are truncated to ~300 chars. Sending more is fine, it just gets trimmed. Over **20 turns → 422.**
+- On a follow-up the server rewrites the query into a standalone one before retrieving. Costs one cheap model call, **only when `history` is non-empty** — first turns are unaffected.
+
+### `sources_first` — the perceived-latency win
+
+| field | type | meaning |
+|-------|------|---------|
+| `sources_first` | bool | Default `false`. `true` → `__SOURCES__` leads the stream. |
+
+```
+__SOURCES__<json>\n\n<answer tokens streamed…>\n\n__META__<json>
+```
+
+Same payload, same `__META__` position — only the sources move. Today you can't render anything until the whole answer finishes generating; with this you paint source cards the moment retrieval lands and stream prose into place.
+
+⚠️ **It changes the byte order.** Ship the parser change first, then flip the flag — otherwise the client prints `__SOURCES__{…}` as answer text. This will become the default once clients have migrated.
+
+---
+
 ## 2. YouTube playlists → categories (new feature)
 
 Lets an owner turn a channel's **playlists** into notebook **categories** — works even with no transcripts, because it uses the YouTube Data API (not the blocked scrapers). Imported playlists become real, **locked** topic categories that show up in the existing topic surfaces (`get_topics`, MCP `list_topics`) and are usable as chat scope (`allowed_topic_ids`).

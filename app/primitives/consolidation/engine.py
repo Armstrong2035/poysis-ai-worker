@@ -4,7 +4,7 @@ from typing import Callable, Dict, Any, List, Optional
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
 from app.primitives.consolidation.processors.base import ProcessedChunk
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 from app.primitives.database import DatabaseService
 from llama_index.core import Document
 
@@ -25,7 +25,7 @@ class ConsolidationEngine:
     """
 
     def __init__(self, db: Optional[DatabaseService] = None):
-        self.knowledge = KnowledgeEngine()
+        self.knowledge = get_knowledge_engine()
         self.db = db
 
     def _namespace(self, workspace_id: str) -> str:

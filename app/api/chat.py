@@ -1,35 +1,97 @@
 from collections import defaultdict
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from llama_index.core.llms import ChatMessage, MessageRole
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import asyncio
 import json
 import os
 import re
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import KnowledgeEngine, get_knowledge_engine
 from app.primitives.database import DatabaseService
 from app.api.security import get_user_id, verify_workspace_ownership
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+# Every provider here speaks the OpenAI wire format, so one OpenAILike client covers
+# all of them — a tier only has to name a base URL and the env var holding its key.
+_PROVIDERS = {
+    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+}
+
 # Client sends a tier name, not a raw model ID — keeps model choice out of the
-# client and lets us swap the underlying model per tier without a client release.
+# client and lets us swap the underlying model (or provider) without a client release.
 _TIER_MODELS = {
-    "quick": "gpt-4.1-mini",
-    "thinking": "gpt-4.1",
-    "expert": "gpt-4.1",
+    "quick": ("deepseek", "deepseek-chat"),
+    "thinking": ("openai", "gpt-4.1"),
+    "expert": ("openai", "gpt-4.1"),
 }
 _DEFAULT_TIER = "quick"
+
+# The model behind the internal calls — intent classification, follow-up rewriting,
+# key-quote extraction — kept separate from the answer tiers on purpose. Those calls
+# are short, latency-critical and invisible to the user, and two of them sit on the
+# critical path; they should not inherit whatever model someone picks for prose.
+_UTILITY_MODEL = ("openai", "gpt-4.1-mini")
+
+# A tier naming a provider whose key isn't configured falls back here rather than
+# failing the request. A missing DEEPSEEK_API_KEY should degrade to the old model,
+# not 500 every chat in production.
+_FALLBACK_MODEL = ("openai", "gpt-4.1-mini")
+
+
+def _build_llm(spec, *, temperature: float, max_tokens: int):
+    """Construct a client for a (provider, model) pair, falling back if unconfigured."""
+    from llama_index.llms.openai_like import OpenAILike
+
+    provider, model = spec
+    api_base, key_env = _PROVIDERS[provider]
+    api_key = os.getenv(key_env)
+    if not api_key:
+        print(f"[CHAT] {key_env} not set — falling back to {_FALLBACK_MODEL[1]}")
+        provider, model = _FALLBACK_MODEL
+        api_base, key_env = _PROVIDERS[provider]
+        api_key = os.getenv(key_env)
+
+    return OpenAILike(
+        model=model,
+        api_key=api_key,
+        api_base=api_base,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        is_chat_model=True,
+    )
+
+# History caps. The client owns the transcript (the server is stateless, and public
+# bots share one user_id — server-side history would leak between visitors), so these
+# are the server's guardrails against an unbounded prompt.
+MAX_HISTORY_TURNS = 6            # 3 exchanges — enough for "tell me more" to resolve
+MAX_HISTORY_TURNS_ACCEPTED = 20  # beyond this the client is misusing the field
+ASSISTANT_TURN_CHARS = 300       # answers are long; only their gist carries the thread
+
+
+class Turn(BaseModel):
+    role: str      # "user" | "assistant"
+    content: str
 
 
 class ChatRequest(BaseModel):
     workspace_id: str
     query: str
+    history: List[Turn] = []     # oldest → newest, excluding the current query
     top_k: Optional[int] = 8            # synthesis across sources needs more material than lookup does
     min_score: Optional[float] = 0.4
     model: Optional[str] = None  # tier name: "quick" | "thinking" | "expert"
     mode: Optional[str] = None   # "retrieval" | "synthesis"; None → classify the query
+    # Emit __SOURCES__ before the prose instead of after it. Nothing can render until
+    # retrieval lands either way, but the answer takes seconds more to generate — so
+    # leading with sources lets the client paint cards immediately and stream prose
+    # into place, which is most of the perceived latency for zero model change.
+    # Opt-in because it changes the wire order: a client that expects prose first
+    # would render the marker as text. Flip the default once clients have migrated.
+    sources_first: Optional[bool] = False
     temperature: Optional[float] = 0.4                  # grounded, but high enough that the model synthesizes instead of defaulting to "not enough information"
     max_tokens: Optional[int] = 800                # backstop for brief, screenshot-friendly answers (prompt does the real work)
     instructions: Optional[str] = None                  # system prompt from playground branding
@@ -240,17 +302,8 @@ async def _classify_intent(query: str) -> str:
     Fails toward "synthesis" — the platform's default behavior — on any error, so the
     classifier can never make a query worse than it is today.
     """
-    from llama_index.llms.openai_like import OpenAILike
-
     try:
-        llm = OpenAILike(
-            model=_TIER_MODELS[_DEFAULT_TIER],
-            api_key=os.getenv("OPENAI_API_KEY"),
-            api_base="https://api.openai.com/v1",
-            temperature=0.0,
-            max_tokens=5,
-            is_chat_model=True,
-        )
+        llm = _build_llm(_UTILITY_MODEL, temperature=0.0, max_tokens=5)
         prompt = (
             "Classify the user's query as either RETRIEVAL or SYNTHESIS.\n\n"
             "RETRIEVAL — they want to find, list, or browse specific sources, or look up a "
@@ -271,7 +324,64 @@ async def _classify_intent(query: str) -> str:
         return "synthesis"
 
 
-async def _retrieve(engine: KnowledgeEngine, request: ChatRequest) -> List[Dict[str, Any]]:
+def _trim_history(history: List[Turn]) -> List[Turn]:
+    """Keep the last few turns, with assistant answers cut to their opening.
+
+    Assistant turns are the expensive ones — a full prior answer can be longer than
+    the context we retrieve. Their job here is only to make the *next* user turn
+    resolvable ("tell me more about that"), and the opening lines carry that.
+    """
+    recent = history[-MAX_HISTORY_TURNS:]
+    return [
+        Turn(
+            role=t.role,
+            content=(
+                t.content[:ASSISTANT_TURN_CHARS]
+                if t.role == "assistant" and len(t.content) > ASSISTANT_TURN_CHARS
+                else t.content
+            ),
+        )
+        for t in recent
+    ]
+
+
+async def _standalone_query(history: List[Turn], query: str) -> str:
+    """Rewrite a follow-up into a self-contained question for retrieval.
+
+    Retrieval and generation need different things from the history. Generation wants
+    the conversation; retrieval wants one embeddable sentence — "what about doubt?"
+    embeds to noise, because the subject lives in the previous turn, not this one.
+
+    Unlike _classify_intent this cannot run concurrently with retrieval: it decides
+    what to retrieve. That is why it is skipped whenever there is no history, which is
+    the common case — a first turn pays nothing. Any failure falls back to the raw
+    query, so the worst case is today's behaviour.
+    """
+    if not history:
+        return query
+    try:
+        llm = _build_llm(_UTILITY_MODEL, temperature=0.0, max_tokens=60)
+        transcript = "\n".join(f"{t.role}: {t.content}" for t in history)
+        prompt = (
+            "Rewrite the follow-up question as a standalone question that can be "
+            "understood without the conversation. Resolve pronouns and references "
+            "using the conversation. Keep the user's wording and intent — do not "
+            "answer it, expand it, or add topics they didn't raise. If it already "
+            "stands alone, repeat it unchanged.\n\n"
+            "Reply with ONLY the rewritten question.\n\n"
+            f"Conversation:\n{transcript}\n\n"
+            f"Follow-up: {query}\n\nStandalone:"
+        )
+        rewritten = str(await llm.acomplete(prompt)).strip().strip('"')
+        # A blank or runaway rewrite means the model ignored the instruction.
+        if not rewritten or len(rewritten) > 400:
+            return query
+        return rewritten
+    except Exception:
+        return query
+
+
+async def _retrieve(engine: KnowledgeEngine, request: ChatRequest, query: str) -> List[Dict[str, Any]]:
     """
     Shared retrieval core for both chat modes: over-fetch a wide pool so diversity has
     candidates from many sources, apply the min_score floor, trim to the natural relevance
@@ -279,7 +389,7 @@ async def _retrieve(engine: KnowledgeEngine, request: ChatRequest) -> List[Dict[
     """
     candidates = await engine.fetch_raw(
         notebook_id=f"consolidation_{request.workspace_id}",
-        text=request.query,
+        text=query,
         top_k=request.top_k * 6,
         connection_ids=request.allowed_connection_ids,
         topic_ids=request.allowed_topic_ids,
@@ -319,7 +429,9 @@ async def chat(
     Retrieves from consolidation_{workspace_id} with source diversity, then:
       - SYNTHESIS (default): streams a grounded answer, then \\n\\n__SOURCES__{json},
         then \\n\\n__META__{json} (scale, themes, one grounded key quote). Byte-for-byte
-        the original contract — no leading marker.
+        the original contract — no leading marker. With `sources_first`, __SOURCES__
+        leads instead (followed by \\n\\n), so the client can paint source cards while
+        the answer is still generating; __META__ still trails.
       - RETRIEVAL: leads with \\n\\n__MODE__{json} (so a client renders a source list, not
         a typing indicator), then __SOURCES__ and a leaner __META__ (scale, themes; no
         key quote). No synthesized prose, no synthesis LLM call.
@@ -328,11 +440,15 @@ async def chat(
     """
     await verify_workspace_ownership(request.workspace_id, user_id)
 
-    engine = KnowledgeEngine()
+    if len(request.history) > MAX_HISTORY_TURNS_ACCEPTED:
+        raise HTTPException(
+            status_code=422,
+            detail=f"history exceeds {MAX_HISTORY_TURNS_ACCEPTED} turns.",
+        )
+
+    engine = get_knowledge_engine()
 
     async def generate():
-        from llama_index.llms.openai_like import OpenAILike
-
         try:
             # Classify intent concurrently with retrieval when no explicit mode is given:
             # both must happen, retrieval is network-bound, so the classifier's latency
@@ -341,7 +457,11 @@ async def chat(
                 asyncio.create_task(_classify_intent(request.query))
                 if request.mode is None else None
             )
-            diverse = await _retrieve(engine, request)
+            # Resolve references before retrieving — a follow-up's subject lives in the
+            # previous turn, so the raw text would embed to noise. No-op on a first turn.
+            history = _trim_history(request.history)
+            search_query = await _standalone_query(history, request.query)
+            diverse = await _retrieve(engine, request, search_query)
             mode = request.mode if classify_task is None else await classify_task
 
             if not diverse:
@@ -379,15 +499,13 @@ async def chat(
             else:
                 # Key quote runs concurrently on a cheap model so its latency hides behind
                 # the main answer's streaming; awaited once at the end for the meta block.
-                quote_llm = OpenAILike(
-                    model=_TIER_MODELS[_DEFAULT_TIER],
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                    api_base="https://api.openai.com/v1",
-                    temperature=0.0,
-                    max_tokens=256,
-                    is_chat_model=True,
-                )
+                quote_llm = _build_llm(_UTILITY_MODEL, temperature=0.0, max_tokens=256)
                 quote_task = asyncio.create_task(_extract_key_quote(diverse, quote_llm))
+
+                # Built before the answer either way — only the emission point moves.
+                sources_payload = json.dumps(_build_sources(diverse))
+                if request.sources_first:
+                    yield f"__SOURCES__{sources_payload}\n\n"
 
                 context_parts = []
                 for c in diverse:
@@ -400,26 +518,41 @@ async def chat(
 
                 system = _build_system_prompt(request.instructions, request.creator_name)
 
-                prompt = (
-                    f"{system}\n\n"
-                    f"Context:\n{context}\n\n"
-                    f"Question: {request.query}\n\n"
-                    "Answer:"
+                # Real message roles rather than one concatenated string: prior turns
+                # have to be attributable for the model to follow the thread, and it
+                # keeps the static system contract as a cacheable prefix.
+                messages = [ChatMessage(role=MessageRole.SYSTEM, content=system)]
+                for turn in history:
+                    messages.append(
+                        ChatMessage(
+                            role=(
+                                MessageRole.ASSISTANT
+                                if turn.role == "assistant"
+                                else MessageRole.USER
+                            ),
+                            content=turn.content,
+                        )
+                    )
+                # Context rides with the current question, not the system prompt — it is
+                # retrieved fresh for this turn and must not look like a standing rule.
+                messages.append(
+                    ChatMessage(
+                        role=MessageRole.USER,
+                        content=f"Context:\n{context}\n\nQuestion: {request.query}",
+                    )
                 )
 
-                llm = OpenAILike(
-                    model=_TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                    api_base="https://api.openai.com/v1",
+                llm = _build_llm(
+                    _TIER_MODELS.get(request.model, _TIER_MODELS[_DEFAULT_TIER]),
                     temperature=request.temperature,
                     max_tokens=request.max_tokens,
-                    is_chat_model=True,
                 )
-                streaming_response = await llm.astream_complete(prompt)
+                streaming_response = await llm.astream_chat(messages)
                 async for delta in streaming_response:
                     yield delta.delta
 
-                yield f"\n\n__SOURCES__{json.dumps(_build_sources(diverse))}"
+                if not request.sources_first:
+                    yield f"\n\n__SOURCES__{sources_payload}"
 
                 # Meta cards: recurring themes it touches (from clustering) and one grounded
                 # key quote. Each degrades to empty/None independently so a slow or failed
@@ -442,7 +575,10 @@ async def chat(
             asyncio.create_task(DatabaseService().log_topic_event({
                 "workspace_id": request.workspace_id,
                 "user_id": user_id,
-                "query": request.query,
+                # The resolved question, not the fragment the user typed. "what about
+                # doubt?" is useless as graph/training data; the standalone form is the
+                # one that actually drove retrieval.
+                "query": search_query,
                 "topic_ids": category_ids,
                 "themes": themes,
                 "source_ids": list(distinct_sources),

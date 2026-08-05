@@ -213,7 +213,7 @@ async def ingest_youtube_transcript(
 
     from app.primitives.consolidation.connectors.base import RawSourceItem
     from app.primitives.consolidation.processors.transcript import TranscriptProcessor
-    from app.primitives.knowledge.engine import KnowledgeEngine
+    from app.primitives.knowledge.engine import get_knowledge_engine
 
     item = RawSourceItem(
         source_id=req.video_id,
@@ -235,7 +235,7 @@ async def ingest_youtube_transcript(
         raise HTTPException(status_code=422, detail="No transcript chunks produced — video may have no usable captions.")
 
     namespace = f"consolidation_{req.workspace_id}"
-    knowledge = KnowledgeEngine()
+    knowledge = get_knowledge_engine()
     vectors_indexed = await knowledge.embed_and_store(namespace, chunks)
 
     await db.mark_files_indexed(req.workspace_id, [{
