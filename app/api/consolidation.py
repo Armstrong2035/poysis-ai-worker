@@ -93,6 +93,7 @@ async def _run_snapshot_job(
     total_docs = 0
     total_skipped = 0
     total_orphaned = 0
+    total_failed = 0
     all_errors = []
     iteration = 0
     current_scope = scope
@@ -109,6 +110,7 @@ async def _run_snapshot_job(
                     "docs_processed": total_docs + p["docs_processed"],
                     "docs_skipped": total_skipped + p["docs_skipped"],
                     "docs_orphaned": total_orphaned + p["docs_orphaned"],
+                    "docs_failed": total_failed + p["docs_failed"],
                 }
                 _jobs[workspace_id].update(snapshot)
                 # Writes progress for the SSE stream to read *and* heartbeats the row
@@ -122,6 +124,7 @@ async def _run_snapshot_job(
             total_docs += result["docs_processed"]
             total_skipped += result.get("docs_skipped", 0)
             total_orphaned += result.get("docs_orphaned", 0)
+            total_failed += result.get("docs_failed", 0)
             all_errors.extend(result.get("errors", []))
 
             if not result.get("partial"):
@@ -153,6 +156,7 @@ async def _run_snapshot_job(
                 "docs_processed": total_docs,
                 "docs_skipped": total_skipped,
                 "docs_orphaned": total_orphaned,
+                "docs_failed": total_failed,
                 "iterations": iteration,
             }
             _jobs[workspace_id] = {**_jobs[workspace_id], **status_update}
@@ -173,6 +177,7 @@ async def _run_snapshot_job(
             "docs_processed": total_docs,
             "docs_skipped": total_skipped,
             "docs_orphaned": total_orphaned,
+            "docs_failed": total_failed,
             # Per-document failures don't fail the run, but dropping them entirely
             # let a run that enumerated a fraction of a channel report a clean
             # "done". Cap the payload — a bad run can produce thousands.
@@ -208,7 +213,7 @@ async def ingest_youtube_transcript(
 
     from app.primitives.consolidation.connectors.base import RawSourceItem
     from app.primitives.consolidation.processors.transcript import TranscriptProcessor
-    from app.primitives.knowledge.engine import KnowledgeEngine
+    from app.primitives.knowledge.engine import get_knowledge_engine
 
     item = RawSourceItem(
         source_id=req.video_id,
@@ -230,7 +235,7 @@ async def ingest_youtube_transcript(
         raise HTTPException(status_code=422, detail="No transcript chunks produced — video may have no usable captions.")
 
     namespace = f"consolidation_{req.workspace_id}"
-    knowledge = KnowledgeEngine()
+    knowledge = get_knowledge_engine()
     vectors_indexed = await knowledge.embed_and_store(namespace, chunks)
 
     await db.mark_files_indexed(req.workspace_id, [{

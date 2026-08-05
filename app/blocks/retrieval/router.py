@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 import os
 import tempfile
 import shutil
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 from app.primitives.knowledge.vector_store import VectorService
 from app.primitives.knowledge.embedder import Embedder
 from app.api.security import get_user_id, verify_workspace_ownership
@@ -56,7 +56,7 @@ async def search_documents(
     await _authorize_notebook(request.notebook_id, user_id)
 
     try:
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
         
         # Delegate raw fetch to the Engine (no opinions)
         raw_results = await engine.fetch_raw(
@@ -151,7 +151,7 @@ async def ingest_file(
         print(f"[INGEST-FILE] Received '{file.filename}' ({file.content_type}) for notebook '{notebook_id}'")
 
         # 4. Run the Ingestion Pipeline
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
         count = await engine.ingest_file(notebook_id, tmp_path)
 
         return {
@@ -201,7 +201,7 @@ async def query_knowledge_base(
 
         # Use the SAME embedder + namespace that consolidation wrote with.
         # Embedder mismatch silently returns garbage scores; namespace mismatch returns nothing.
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
         namespace = f"consolidation_{request.workspace_id}"
 
         raw_results = await engine.fetch_raw(
@@ -241,6 +241,49 @@ async def query_knowledge_base(
         raise
     except Exception as e:
         print(f"[QUERY_KNOWLEDGE ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CountsRequest(BaseModel):
+    workspace_id: str
+    # Same names and types as ChatRequest's scope fields on purpose: a notebook
+    # sends one scope, and its counts must describe exactly the slice its answers
+    # come from. Diverging here would let the two drift apart silently.
+    allowed_connection_ids: Optional[List[str]] = None
+    allowed_topic_ids: Optional[List[int]] = None
+
+
+@router.post("/counts")
+async def counts(
+    request: CountsRequest,
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Totals for a scoped slice of the knowledge base: documents, passages and
+    categories, plus per-category document counts.
+
+    Consolidation is workspace-wide, so every other counting endpoint
+    (/consolidation/indexed_count, /consolidation/topics) reports the whole
+    workspace. A notebook scoped to one YouTube channel had nothing to report but
+    those workspace totals, so two notebooks on two different channels showed
+    identical figures while correctly answering from different content.
+    """
+    # Outside the try: the bare `except Exception` below would turn a 401/403 into a 500.
+    await verify_workspace_ownership(request.workspace_id, user_id)
+
+    try:
+        vector_service = VectorService()
+        totals = vector_service.count_scoped(
+            namespace=f"consolidation_{request.workspace_id}",
+            connection_ids=request.allowed_connection_ids,
+            topic_ids=request.allowed_topic_ids,
+        )
+        return {"workspace_id": request.workspace_id, **totals}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[COUNTS ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

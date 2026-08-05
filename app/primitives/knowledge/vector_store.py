@@ -214,6 +214,85 @@ class VectorService:
 
         return {row[0]: int(row[1]) for row in rows}
 
+    def count_scoped(
+        self,
+        namespace: str,
+        source_types: Optional[List[str]] = None,
+        topic_ids: Optional[List[int]] = None,
+        connection_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Document/passage/category totals for a namespace under a retrieval scope.
+
+        Applies the same filters as query_vectors, including the empty-list rule:
+        `is not None` (not truthiness), so a caller allowed zero connections counts
+        zero rather than falling through to the whole workspace. The two must agree
+        — a count that describes a wider slice than the scope can actually answer
+        from is worse than no count.
+
+        `by_category` is returned alongside the totals because documents can hold
+        chunks in several categories, so the per-category counts don't sum to the
+        totals and can't be derived from them.
+        """
+        conditions = ["namespace = %s"]
+        params: List[Any] = [namespace]
+
+        if source_types is not None:
+            conditions.append("metadata->>'source_type' = ANY(%s)")
+            params.append(source_types)
+
+        if topic_ids is not None:
+            conditions.append("(metadata->>'category_id')::int = ANY(%s)")
+            params.append(topic_ids)
+
+        if connection_ids is not None:
+            conditions.append("metadata->>'connection_id' = ANY(%s)")
+            params.append(connection_ids)
+
+        where = " AND ".join(conditions)
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(DISTINCT metadata->>'source_id')   AS documents,
+                        COUNT(*)                                 AS passages,
+                        COUNT(DISTINCT metadata->>'category_id') AS categories
+                    FROM vectors
+                    WHERE {where}
+                    """,
+                    params,
+                )
+                documents, passages, categories = cur.fetchone()
+
+                # Unclustered chunks carry no category_id; they still count toward
+                # the totals above but have no category to be listed under.
+                cur.execute(
+                    f"""
+                    SELECT
+                        metadata->>'category_id'               AS category_id,
+                        COUNT(DISTINCT metadata->>'source_id') AS documents
+                    FROM vectors
+                    WHERE {where} AND metadata->>'category_id' IS NOT NULL
+                    GROUP BY 1
+                    """,
+                    params,
+                )
+                by_category = cur.fetchall()
+            conn.rollback()
+        finally:
+            self._put_conn(conn)
+
+        return {
+            "documents": int(documents),
+            "passages": int(passages),
+            "categories": int(categories),
+            "by_category": [
+                {"category_id": row[0], "documents": int(row[1])} for row in by_category
+            ],
+        }
+
     def fetch_all_vectors(self, namespace: str) -> List[Dict[str, Any]]:
         """Fetch all vectors with embeddings for a namespace (used for clustering)."""
         conn = self._get_conn()

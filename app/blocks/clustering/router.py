@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 
 router = APIRouter(tags=["clustering"])
 
@@ -18,7 +18,7 @@ async def cluster_documents(request: ClusterRequest):
     Use case: De-duplicate support tickets, group product reviews into themes.
     """
     try:
-        engine = KnowledgeEngine()
+        engine = get_knowledge_engine()
 
         # First, upsert all documents so they are in the knowledge base
         await engine.upsert_documents(request.workspace_id, request.documents)

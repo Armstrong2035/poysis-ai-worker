@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Callable, Dict, List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.connectors.base import RawSourceItem
@@ -49,13 +49,23 @@ class SnapshotRunner:
         self.docs_processed = 0
         self.docs_skipped = 0
         self.docs_orphaned = 0
+        self.docs_failed = 0
         self.has_more = False
         self.errors: List[str] = []
         self.completed_files: List[dict] = []  # flushed to DB after each batch
+        # Fired once per resolved item, success or failure. A heartbeat driven by
+        # yielded chunks goes silent exactly when a run is going wrong: failures
+        # produce no chunks, so a channel whose remaining videos all fail captions
+        # looks identical to a dead worker for as long as it keeps failing.
+        self.on_activity: Optional[Callable[[], None]] = None
         self._doc_processor = DocumentProcessor()
         self._sheet_processor = SpreadsheetProcessor()
         self._pdf_processor = PDFProcessor()
         self._transcript_processor = TranscriptProcessor()
+
+    def _activity(self) -> None:
+        if self.on_activity:
+            self.on_activity()
 
     async def discover(self) -> dict:
         total_files = 0
@@ -181,11 +191,14 @@ class SnapshotRunner:
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
                     self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
+                    self.docs_failed += 1
+                    self._activity()
                     continue
                 for chunk in chunks:
                     yield chunk
                 self.docs_processed += 1
                 self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
+                self._activity()
                 print(f"[STEP 2 PARSE ] '{item.title}' queued for embedding ✓")
 
             # Ensure all tasks are awaited even if queue consumed early
@@ -230,11 +243,14 @@ class SnapshotRunner:
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
                     self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
+                    self.docs_failed += 1
+                    self._activity()
                     continue
                 for chunk in chunks:
                     yield chunk
                 self.docs_processed += 1
                 self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
+                self._activity()
 
             await asyncio.gather(*nango_tasks, return_exceptions=True)
 
@@ -312,11 +328,14 @@ class SnapshotRunner:
                 if error is not None:
                     self.errors.append(f"[{item.source_id}] {item.title}: {error}")
                     self.completed_files.append({"source_id": item.source_id, "etag": f"ORPHANED:{item.etag}", "source_type": item.source_type})
+                    self.docs_failed += 1
+                    self._activity()
                     continue
                 for chunk in chunks:
                     yield chunk
                 self.docs_processed += 1
                 self.completed_files.append({"source_id": item.source_id, "etag": item.etag, "source_type": item.source_type})
+                self._activity()
 
             await asyncio.gather(*yt_tasks, return_exceptions=True)
 

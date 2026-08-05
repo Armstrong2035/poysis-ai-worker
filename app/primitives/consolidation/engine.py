@@ -1,13 +1,21 @@
+import time
 from typing import Callable, Dict, Any, List, Optional
 
 from app.primitives.consolidation.scope import ScopeConfig
 from app.primitives.consolidation.snapshot import SnapshotRunner
 from app.primitives.consolidation.processors.base import ProcessedChunk
-from app.primitives.knowledge.engine import KnowledgeEngine
+from app.primitives.knowledge.engine import get_knowledge_engine
 from app.primitives.database import DatabaseService
 from llama_index.core import Document
 
 BATCH_SIZE = 200
+
+# Floor on the gap between progress writes. Every resolved document now
+# heartbeats, and a Drive run resolves several per second — without this the
+# run would spend itself on database writes. Loose enough to keep the write
+# rate sane, tight enough that a client watching `updated_at` can still tell
+# "working" from "stalled".
+PROGRESS_INTERVAL_SECONDS = 5
 
 
 class ConsolidationEngine:
@@ -17,7 +25,7 @@ class ConsolidationEngine:
     """
 
     def __init__(self, db: Optional[DatabaseService] = None):
-        self.knowledge = KnowledgeEngine()
+        self.knowledge = get_knowledge_engine()
         self.db = db
 
     def _namespace(self, workspace_id: str) -> str:
@@ -58,15 +66,26 @@ class ConsolidationEngine:
         total_vectors = 0
         batch_number = 0
         last_reported_docs = -1  # forces an initial event the moment the first doc completes
+        last_emit = 0.0
 
-        def _emit():
-            if progress_callback:
-                progress_callback({
-                    "vectors_indexed": total_vectors,
-                    "docs_processed": runner.docs_processed,
-                    "docs_skipped": runner.docs_skipped,
-                    "docs_orphaned": runner.docs_orphaned,
-                })
+        def _emit(force: bool = False):
+            nonlocal last_emit
+            if not progress_callback:
+                return
+            now = time.monotonic()
+            if not force and now - last_emit < PROGRESS_INTERVAL_SECONDS:
+                return
+            last_emit = now
+            progress_callback({
+                "vectors_indexed": total_vectors,
+                "docs_processed": runner.docs_processed,
+                "docs_skipped": runner.docs_skipped,
+                "docs_orphaned": runner.docs_orphaned,
+                "docs_failed": runner.docs_failed,
+            })
+
+        # Heartbeat on every resolved document, not just on chunks reaching us.
+        runner.on_activity = _emit
 
         async def _flush_doc_batch():
             nonlocal total_vectors, batch_number
@@ -112,13 +131,14 @@ class ConsolidationEngine:
         await _flush_doc_batch()
         await _flush_transcript_batch()
         await self._flush_completed_files(scope.workspace_id, runner)
-        _emit()
+        _emit(force=True)
 
         return {
             "workspace_id": scope.workspace_id,
             "docs_processed": runner.docs_processed,
             "docs_skipped": runner.docs_skipped,
             "docs_orphaned": runner.docs_orphaned,
+            "docs_failed": runner.docs_failed,
             "chunks_produced": total_chunks,
             "vectors_indexed": total_vectors,
             "errors": runner.errors,

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import List, Dict, Any, Optional
 from app.primitives.knowledge.embedder import Embedder
@@ -11,11 +12,34 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.readers import SimpleDirectoryReader
 from llama_parse import LlamaParse
 
+_shared_engine: Optional["KnowledgeEngine"] = None
+
+
+def get_knowledge_engine() -> "KnowledgeEngine":
+    """The process-wide KnowledgeEngine. Use this instead of constructing one.
+
+    Constructing an engine opens a `ThreadedConnectionPool` to Postgres, so building
+    one per request meant a fresh TCP + TLS + auth handshake on every call — measured
+    at ~1.4s locally. Worse, nothing ever closed those pools, so each request leaked
+    its connections until Supabase ran out.
+
+    Built lazily rather than at import so that importing this module has no side
+    effects (tests and CLI scripts import it without a database).
+    """
+    global _shared_engine
+    if _shared_engine is None:
+        _shared_engine = KnowledgeEngine()
+    return _shared_engine
+
+
 class KnowledgeEngine:
     """
     The Unified Knowledge Engine (Core Memory).
     Consolidates embedding generation and vector storage into a single capability.
     BERTopic clustering runs as a separate post-snapshot step via ConsolidationEngine.
+
+    Owns a database connection pool — prefer `get_knowledge_engine()` over
+    constructing this directly, or you get a new pool that is never closed.
     """
     def __init__(self):
         self.embedder = Embedder()
@@ -199,7 +223,13 @@ class KnowledgeEngine:
         # maps to category_id written by the clustering step and is used for playground scoping.
         metadata_filter = {"topic_id": topic_id} if topic_id is not None else None
 
-        matches = self.vector_service.query_vectors(
+        # Off-thread: query_vectors is synchronous psycopg2, so calling it inline held
+        # the event loop for the whole query — measured at 0 heartbeats during a 2.4s
+        # query where ~474 were expected. That serialises every concurrent request
+        # behind whichever one is currently reading. The write path already does this
+        # (see VectorService._insert_batch's caller); the read path did not.
+        matches = await asyncio.to_thread(
+            self.vector_service.query_vectors,
             query_embedding=query_embedding,
             namespace=notebook_id,
             top_k=top_k,
