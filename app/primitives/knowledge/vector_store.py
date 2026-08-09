@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 from psycopg2.extras import execute_values
+from psycopg2.extensions import make_dsn
 from psycopg2.pool import ThreadedConnectionPool
 from typing import List, Dict, Any, Optional
 
@@ -21,9 +22,24 @@ def _strip_null_bytes(value):
 
 class VectorService:
     def __init__(self):
-        self.conn_str = os.getenv("SUPABASE_DIRECT_CONNECTION_STRING")
+        # DB_CONNECTION_STRING on AWS (RDS); fall back to Supabase for local dev.
+        self.conn_str = (
+            os.getenv("DB_CONNECTION_STRING")
+            or os.getenv("SUPABASE_DIRECT_CONNECTION_STRING")
+        )
         if not self.conn_str:
-            raise ValueError("SUPABASE_DIRECT_CONNECTION_STRING not found in environment")
+            required = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+            if all(os.getenv(name) for name in required):
+                self.conn_str = make_dsn(
+                    host=os.environ["DB_HOST"], port=os.environ["DB_PORT"],
+                    dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+                    password=os.environ["DB_PASSWORD"], sslmode=os.getenv("DB_SSLMODE", "require"),
+                )
+        if not self.conn_str:
+            raise ValueError(
+                "No database connection string found. "
+                "Set DB_CONNECTION_STRING, SUPABASE_DIRECT_CONNECTION_STRING, or the DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD fields."
+            )
 
         # Reuse a small pool instead of opening a fresh connection per batch.
         # The connection string points at Supavisor's transaction-mode pooler

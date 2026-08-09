@@ -16,17 +16,27 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 # Every provider here speaks the OpenAI wire format, so one OpenAILike client covers
 # all of them — a tier only has to name a base URL and the env var holding its key.
+# On AWS: requests go through Bedrock's OpenAI-compatible endpoint so they are billed
+# to AWS credits. BEDROCK_OPENAI_BASE is set by the ECS task environment.
+# Locally: falls back to direct OpenAI / DeepSeek endpoints.
+_BEDROCK_OPENAI_BASE = os.getenv("BEDROCK_OPENAI_BASE")  # e.g. https://bedrock-runtime.us-east-1.amazonaws.com/model/
+
 _PROVIDERS = {
-    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "openai": (
+        _BEDROCK_OPENAI_BASE or "https://api.openai.com/v1",
+        "BEDROCK_API_KEY" if _BEDROCK_OPENAI_BASE else "OPENAI_API_KEY",
+    ),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
 }
 
 # Client sends a tier name, not a raw model ID — keeps model choice out of the
 # client and lets us swap the underlying model (or provider) without a client release.
+# On AWS: GPT-5.6 Luna via Bedrock for all tiers (fast, cheap, all billed to AWS).
+_BEDROCK_FAST_MODEL = os.getenv("BEDROCK_CHAT_MODEL", "openai.gpt-5-6-luna")
 _TIER_MODELS = {
-    "quick": ("deepseek", "deepseek-chat"),
-    "thinking": ("openai", "gpt-4.1"),
-    "expert": ("openai", "gpt-4.1"),
+    "quick":    ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1-mini"),
+    "thinking": ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1"),
+    "expert":   ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1"),
 }
 _DEFAULT_TIER = "quick"
 
@@ -34,12 +44,12 @@ _DEFAULT_TIER = "quick"
 # key-quote extraction — kept separate from the answer tiers on purpose. Those calls
 # are short, latency-critical and invisible to the user, and two of them sit on the
 # critical path; they should not inherit whatever model someone picks for prose.
-_UTILITY_MODEL = ("openai", "gpt-4.1-mini")
+_UTILITY_MODEL = ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1-mini")
 
 # A tier naming a provider whose key isn't configured falls back here rather than
 # failing the request. A missing DEEPSEEK_API_KEY should degrade to the old model,
 # not 500 every chat in production.
-_FALLBACK_MODEL = ("openai", "gpt-4.1-mini")
+_FALLBACK_MODEL = ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1-mini")
 
 
 def _build_llm(spec, *, temperature: float, max_tokens: int):

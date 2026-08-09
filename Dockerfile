@@ -1,31 +1,52 @@
 FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV PORT 8000
-
-# Install system dependencies needed for some Python packages and PDF parsing
+# ── Build-time deps ──────────────────────────────────────────────────────────
+# libpq-dev  — psycopg2-binary needs the Postgres C client headers
+# curl       — ECS container health check
+# build-essential — native extension builds (e.g. hdbscan, umap-learn)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set work directory
+# ── Python env ───────────────────────────────────────────────────────────────
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000
+
+# ── Non-root user ─────────────────────────────────────────────────────────────
+# ECS best-practice: never run as root inside the container.
+RUN groupadd --gid 1001 appgroup \
+    && useradd --uid 1001 --gid appgroup --no-create-home appuser
+
 WORKDIR /app
 
-# Install dependencies
-# We copy requirements first to leverage Docker cache
+# ── Dependencies (cached layer) ───────────────────────────────────────────────
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
-COPY . .
+# ── Application code ──────────────────────────────────────────────────────────
+COPY --chown=appuser:appgroup . .
 
-# Expose the port the app runs on
+USER appuser
+
 EXPOSE 8000
 
-# Run the FastAPI application using uvicorn
-# We use main:app because main.py exports the FastAPI instance as 'app'
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# ── Process manager ───────────────────────────────────────────────────────────
+# gunicorn wraps uvicorn workers so the OS-level process manager can restart
+# individual workers without killing the whole container.
+# Workers = 1: snapshot jobs are long-running async tasks; multiple workers
+# would each hold their own in-memory _jobs dict, causing /stream to poll the
+# wrong worker's state. Keep 1 worker and let ECS task count handle scale.
+CMD ["sh", "-c", \
+     "gunicorn main:app \
+      --worker-class uvicorn.workers.UvicornWorker \
+      --workers 1 \
+      --bind 0.0.0.0:${PORT:-8000} \
+      --timeout 0 \
+      --graceful-timeout 30 \
+      --keep-alive 5 \
+      --access-logfile - \
+      --error-logfile -"]

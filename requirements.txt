@@ -1,31 +1,42 @@
 fastapi
 uvicorn
+gunicorn
 httpx
 pydantic[email]
-google-generativeai
 python-dotenv
-supabase
+# Database — direct psycopg2 (replaces supabase SDK for app queries)
 psycopg2-binary
 pgvector
-cohere
-gunicorn
-python-multipart
+# AWS
+boto3==1.35.0
+# AI — embeddings (OpenAI, unchanged) + LLM via Bedrock
 llama-index
 llama-index-embeddings-openai
+# LLM fallback providers (local dev / non-Bedrock)
 llama-index-llms-google-genai
 llama-index-llms-openai-like
+# Gemini kept for local dev fallback in embedder.py and categorizer.py
+google-generativeai
+# Document processing
 llama-index-readers-file
 llama-parse
 pymupdf
 pandas
 openpyxl
+python-multipart
+# Clustering (runs in-process)
 bertopic
 umap-learn
 hdbscan
 scikit-learn
 numpy
+# MCP
 mcp
+# Document format parsers
 docx2txt
 python-pptx
+# YouTube
 youtube-transcript-api
 yt-dlp
+# Misc
+cohere

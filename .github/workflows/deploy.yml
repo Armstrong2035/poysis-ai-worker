@@ -1,0 +1,88 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: poysis-worker
+  ECS_CLUSTER: poysis
+  ECS_SERVICE: poysis-worker
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # required for OIDC auth with AWS
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── AWS Auth (OIDC — no long-lived keys) ────────────────────────────────
+      # Requires an OIDC identity provider and IAM role set up in your AWS account.
+      # See AWS_MIGRATION.md → CI/CD Setup for the one-time IAM setup steps.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── ECR login ────────────────────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build & push Docker image ────────────────────────────────────────────
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                      $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ── Deploy to ECS (force new deployment) ─────────────────────────────────
+      # Register a task-definition revision pinned to the immutable Git SHA,
+      # then let ECS perform its rolling deployment.
+      # The service circuit breaker will roll back if the new task fails to become healthy.
+      - name: Deploy to ECS
+        env:
+          IMAGE: ${{ steps.build-image.outputs.image }}
+        run: |
+          TASK_DEFINITION=$(aws ecs describe-task-definition \
+            --task-definition poysis-worker \
+            --query taskDefinition)
+          NEW_TASK_DEFINITION=$(echo "$TASK_DEFINITION" | jq --arg IMAGE "$IMAGE" '
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy) |
+            .containerDefinitions |= map(
+              if .name == "AppContainer" then .image = $IMAGE else . end
+            )')
+          NEW_TASK_DEFINITION_ARN=$(echo "$NEW_TASK_DEFINITION" | \
+            aws ecs register-task-definition --cli-input-json file:///dev/stdin \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition "$NEW_TASK_DEFINITION_ARN" \
+            --region ${{ env.AWS_REGION }}
+
+      # ── Wait for stability ────────────────────────────────────────────────────
+      - name: Wait for ECS service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+        timeout-minutes: 10

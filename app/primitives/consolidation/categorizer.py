@@ -3,14 +3,21 @@ import json
 import os
 from typing import Dict, Any, List, Optional
 import numpy as np
-import google.generativeai as genai
 
 from app.primitives.database import DatabaseService
 from app.primitives.knowledge.vector_store import VectorService
 from app.primitives.consolidation import embedding_cluster
 
-CATEGORIZER_MODEL = "gemini-3.1-flash-lite-preview"
+# Bedrock model used for topic naming, hierarchy, and story detection.
+# Claude 3.5 Haiku: fast, cheap, strong enough for JSON-structured categorization.
+# Falls back to Gemini if AWS creds are not present (local dev).
+BEDROCK_CATEGORIZER_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
+GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite-preview"
 MIN_DOCS_FOR_EMBEDDING_CLUSTER = 10
+
+
+def _use_bedrock() -> bool:
+    return bool(os.getenv("AWS_BEDROCK_REGION") or os.getenv("AWS_DEFAULT_REGION"))
 
 
 def _parse_response(raw: str) -> Optional[Dict[str, Any]]:
@@ -23,6 +30,46 @@ def _parse_response(raw: str) -> Optional[Dict[str, Any]]:
         return json.loads(raw.strip())
     except json.JSONDecodeError:
         return None
+
+
+def _build_bedrock_model():
+    """Return a thin wrapper around Bedrock Claude that exposes generate_content(prompt)."""
+    import boto3
+
+    region = os.getenv("AWS_BEDROCK_REGION") or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    client = boto3.client("bedrock-runtime", region_name=region)
+
+    class _BedrockModel:
+        def generate_content(self, prompt: str) -> "_BedrockResponse":
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            resp = client.invoke_model(
+                modelId=BEDROCK_CATEGORIZER_MODEL,
+                body=body,
+                contentType="application/json",
+                accept="application/json",
+            )
+            payload = json.loads(resp["body"].read())
+            text = payload["content"][0]["text"]
+            return _BedrockResponse(text)
+
+    class _BedrockResponse:
+        def __init__(self, text: str):
+            self.text = text
+
+    return _BedrockModel()
+
+
+def _build_gemini_model():
+    import google.generativeai as genai
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set and AWS credentials not found.")
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(GEMINI_FALLBACK_MODEL)
 
 
 class CategorizerEngine:
@@ -182,11 +229,9 @@ Respond with ONLY valid JSON:
         return semantic_results
 
     def _get_model(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set")
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel(CATEGORIZER_MODEL)
+        if _use_bedrock():
+            return _build_bedrock_model()
+        return _build_gemini_model()
 
     async def run_categorization(self, workspace_id: str) -> Dict[str, Any]:
         namespace = f"consolidation_{workspace_id}"
