@@ -28,7 +28,6 @@ AppStack(
     app,
     "PoisysApp",
     vpc=network.vpc,
-    rds_instance=data.rds_instance,
     rds_secret=data.rds_secret,
     app_secrets=secrets.app_secrets,
     env=env,

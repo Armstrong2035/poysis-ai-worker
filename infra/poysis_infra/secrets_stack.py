@@ -65,5 +65,5 @@ class SecretsStack(cdk.Stack):
             self,
             "AppSecretsArn",
             value=self.app_secrets.secret_arn,
-            description="ARN of the poysis/app secret — needed for ECS task role",
+            description="ARN of the poysis/app secret - needed for ECS task role",
         )

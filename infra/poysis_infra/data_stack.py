@@ -31,18 +31,21 @@ class DataStack(cdk.Stack):
     def __init__(self, scope: Construct, id: str, vpc: ec2.Vpc, **kwargs):
         super().__init__(scope, id, **kwargs)
 
-        # Security group: only ECS tasks (in private subnets) may reach Postgres.
-        # The ECS security group is cross-stack, so we open port 5432 to the
-        # entire private CIDR — tighter than 0.0.0.0/0, still a no-brainer to
-        # tighten further if needed.
+        # Security group: allow Postgres from the VPC CIDR. ECS tasks run in
+        # public subnets (no NAT Gateway), so the simplest dependency-safe rule
+        # is a CIDR-based ingress — no cross-stack SG reference, no cycle.
         self.rds_sg = ec2.SecurityGroup(
             self,
             "RdsSg",
             vpc=vpc,
-            description="Allow Postgres from ECS public subnets only",
+            description="Allow Postgres from within the VPC",
             allow_all_outbound=False,
         )
-        # Public subnets — where ECS tasks now run (no NAT Gateway)
+        self.rds_sg.add_ingress_rule(
+            ec2.Peer.ipv4(vpc.vpc_cidr_block),
+            ec2.Port.tcp(5432),
+            "VPC to RDS 5432",
+        )
         # RDS master credentials — auto-generated and stored in Secrets Manager
         self.rds_secret = rds.DatabaseSecret(
             self,
@@ -59,7 +62,7 @@ class DataStack(cdk.Stack):
             engine=rds.DatabaseInstanceEngine.postgres(
                 version=rds.PostgresEngineVersion.VER_16_4
             ),
-            description="Poysis — pgvector enabled",
+            description="Poysis - pgvector enabled",
             parameters={
                 "shared_preload_libraries": "pg_stat_statements",
                 "max_parallel_workers_per_gather": "2",  # reduced for 2 GB instance
@@ -90,8 +93,10 @@ class DataStack(cdk.Stack):
             max_allocated_storage=500,
             storage_type=rds.StorageType.GP3,
             storage_encrypted=True,
-            # Backups
-            backup_retention=cdk.Duration.days(7),
+            # Backups — 1 day: the account is on AWS Free Tier, which caps automated
+            # backup retention below the default 7-day setting. 1 day keeps automated
+            # backups without incurring backup-storage charges. Raise once off free tier.
+            backup_retention=cdk.Duration.days(1),
             deletion_protection=True,
             # Monitoring
             enable_performance_insights=True,

@@ -28,7 +28,10 @@ cache/
 *.pdf
 *.csv
 *.xlsx
-test-stuff/
+**/test-stuff/
+app/test-stuff/
+output.txt
+dataset_youtube*
 
 # OS
 .DS_Store

@@ -46,7 +46,6 @@ class AppStack(cdk.Stack):
         scope: Construct,
         id: str,
         vpc: ec2.Vpc,
-        rds_instance: rds.DatabaseInstance,
         rds_secret: sm.Secret,
         app_secrets: sm.Secret,
         **kwargs,
@@ -213,6 +212,9 @@ class AppStack(cdk.Stack):
         container.add_port_mappings(ecs.PortMapping(container_port=8000))
 
         # ── Security Group for ECS tasks ─────────────────────────────────────
+        # Owned by AppStack. RDS access is handled in DataStack via a CIDR-based
+        # ingress rule — keeping this SG and its ALB→ECS rule self-contained here
+        # avoids any cross-stack dependency cycle.
         ecs_sg = ec2.SecurityGroup(
             self,
             "EcsSg",
@@ -249,7 +251,7 @@ class AppStack(cdk.Stack):
                 self.fargate_service.load_balancer.connections.security_groups[0].security_group_id
             ),
             ec2.Port.tcp(8000),
-            "ALB → ECS task port 8000",
+            "ALB to ECS task port 8000",
         )
 
         # ALB health check matches the /ping endpoint
@@ -260,11 +262,6 @@ class AppStack(cdk.Stack):
             timeout=cdk.Duration.seconds(10),
             healthy_threshold_count=2,
             unhealthy_threshold_count=3,
-        )
-
-        # Allow ECS tasks to reach RDS
-        rds_instance.connections.allow_from(
-            ecs_sg, ec2.Port.tcp(5432), "ECS → RDS"
         )
 
         # ── Auto-scaling ─────────────────────────────────────────────────────
@@ -336,7 +333,7 @@ def handler(event, context):
             self,
             "AlbDns",
             value=self.fargate_service.load_balancer.load_balancer_dns_name,
-            description="ALB DNS — use this as your WORKER_BASE_URL",
+            description="ALB DNS - use this as your WORKER_BASE_URL",
         )
         cdk.CfnOutput(
             self,

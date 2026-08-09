@@ -33,3 +33,9 @@ Thumbs.db
 .gemini/
 .agent/
 .mcp.json
+
+# AWS CDK
+infra/cdk.out/
+infra/cdk.context.json
+infra/.cdk.staging/
+
