@@ -6,6 +6,8 @@ google-generativeai
 python-dotenv
 supabase
 psycopg2-binary
+boto3
+pyjwt[crypto]
 pgvector
 cohere
 gunicorn

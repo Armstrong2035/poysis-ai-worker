@@ -43,6 +43,11 @@ async def get_analytics_dashboard(
             
         return data
 
+    except HTTPException:
+        # A 404 raised above is an HTTPException, and HTTPException is an
+        # Exception. Without this clause the handler below turns every 404 into
+        # a 500 and hides the real status.
+        raise
     except Exception as e:
         print(f"[ANALYTICS ERROR] {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch analytics dashboard data")

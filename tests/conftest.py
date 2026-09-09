@@ -45,6 +45,38 @@ def make_request(method: str, path: str, user_id: str, **kwargs):
             raise ValueError(f"Unsupported method: {method}")
 
 
+def make_jwt(claims: dict, secret: str, algorithm: str = "HS256") -> str:
+    """
+    Mint a signed JWT for tests.
+
+    Defaults an `exp` an hour out unless the caller sets one, so a token is not
+    accidentally expired. Tests that check expiry pass `exp` explicitly.
+    """
+    import jwt as _jwt
+    import time as _time
+
+    payload = dict(claims)
+    payload.setdefault("iat", int(_time.time()))
+    payload.setdefault("exp", int(_time.time()) + 3600)
+    return _jwt.encode(payload, secret, algorithm=algorithm)
+
+
+def bearer_request(method: str, path: str, token: str, **kwargs):
+    """Helper to make requests authenticated with a bearer token."""
+    headers = kwargs.pop("headers", {})
+    headers["Authorization"] = f"Bearer {token}"
+
+    with httpx.Client(base_url=WORKER_URL) as client:
+        if method == "GET":
+            return client.get(path, headers=headers, **kwargs)
+        elif method == "POST":
+            return client.post(path, headers=headers, **kwargs)
+        elif method == "DELETE":
+            return client.delete(path, headers=headers, **kwargs)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+
+
 async def make_async_request(method: str, path: str, user_id: str, **kwargs):
     """Helper to make authenticated async requests."""
     headers = kwargs.pop("headers", {})

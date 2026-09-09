@@ -36,6 +36,8 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as targets,
     aws_lambda as lambda_,
+    aws_certificatemanager as acm,
+    aws_elasticloadbalancingv2 as elbv2,
 )
 from constructs import Construct
 
@@ -53,19 +55,12 @@ class AppStack(cdk.Stack):
         super().__init__(scope, id, **kwargs)
 
         # ── ECR Repository ──────────────────────────────────────────────────
-        self.ecr_repo = ecr.Repository(
+        # Repo already exists in the account — import it rather than creating
+        # a new one so CDK takes ownership without failing on a duplicate.
+        self.ecr_repo = ecr.Repository.from_repository_name(
             self,
             "EcrRepo",
-            repository_name="poysis-worker",
-            image_scan_on_push=True,
-            # Keep the last 10 images; older ones are cleaned up automatically.
-            lifecycle_rules=[
-                ecr.LifecycleRule(
-                    max_image_count=10,
-                    description="Keep last 10 images",
-                )
-            ],
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+            "poysis-worker",
         )
 
         # ── CloudWatch Log Group ─────────────────────────────────────────────
@@ -223,16 +218,27 @@ class AppStack(cdk.Stack):
             allow_all_outbound=True,  # outbound for LLM APIs, Nango, YouTube, etc.
         )
 
-        # ── ALB + Fargate Service ────────────────────────────────────────────
-        self.fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
-            self,
-            "FargateService",
+        # ── TLS ──────────────────────────────────────────────────────────────
+        # DNS for poysis.com is at Namecheap, not Route 53, so CDK cannot validate a
+        # certificate on its own. Create the certificate first, then pass its ARN
+        # in as context. Without the context value the stack stays HTTP-only, so
+        # this file still deploys before the certificate exists.
+        #
+        #   1. aws acm request-certificate --domain-name api.poysis.com \
+        #        --validation-method DNS --region us-east-1
+        #   2. Add the CNAME that the command returns at your DNS provider.
+        #   3. Wait until the certificate status is ISSUED.
+        #   4. cdk deploy PoisysApp -c certificate_arn=arn:aws:acm:us-east-1:...
+        #   5. Add a CNAME for api.poysis.com that points at the ALB DNS name.
+        cert_arn = self.node.try_get_context("certificate_arn")
+        domain_name = self.node.try_get_context("domain_name") or "api.poysis.com"
+
+        service_kwargs = dict(
             cluster=cluster,
             task_definition=task_def,
             desired_count=1,
             service_name="poysis-worker",
             public_load_balancer=True,
-            listener_port=80,
             # Tasks run in PUBLIC subnets — no NAT Gateway needed.
             # assign_public_ip=True gives each task a public IP for outbound traffic.
             task_subnets=ec2.SubnetSelection(
@@ -242,6 +248,39 @@ class AppStack(cdk.Stack):
             security_groups=[ecs_sg],
             health_check_grace_period=cdk.Duration.seconds(120),
             circuit_breaker=ecs.DeploymentCircuitBreaker(rollback=True),
+            # ECS Exec gives a shell inside the running task. RDS sits in an
+            # isolated subnet, so this is the route in for migrations and for
+            # database checks. CDK adds the ssmmessages permissions to the task
+            # role for us.
+            enable_execute_command=True,
+        )
+
+        if cert_arn:
+            # Port 443 serves the application.
+            service_kwargs.update(
+                protocol=elbv2.ApplicationProtocol.HTTPS,
+                listener_port=443,
+                certificate=acm.Certificate.from_certificate_arn(
+                    self, "AlbCertificate", cert_arn
+                ),
+            )
+            # The port 80 redirect needs a SECOND deployment.
+            # CloudFormation creates the new redirect listener before it moves the
+            # existing listener off port 80, so one deployment fails with
+            # "A listener already exists on this port". Deploy with the certificate
+            # first, then deploy again adding -c http_redirect=true.
+            if self.node.try_get_context("http_redirect"):
+                service_kwargs.update(redirect_http=True)
+            self.public_base_url = f"https://{domain_name}"
+        else:
+            service_kwargs.update(listener_port=80)
+            self.public_base_url = None
+
+        # ── ALB + Fargate Service ────────────────────────────────────────────
+        self.fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self,
+            "FargateService",
+            **service_kwargs,
         )
 
         # Lock down inbound on the ECS SG — only the ALB may reach port 8000.
@@ -313,7 +352,10 @@ def handler(event, context):
                 # WORKER_URL is the ALB DNS — set after first deploy.
                 # Update this env var once you have the ALB DNS name from the
                 # CfnOutput below, then redeploy just this stack.
-                "WORKER_URL": f"http://{self.fargate_service.load_balancer.load_balancer_dns_name}",
+                # With TLS on, call the certificate's own name. The ALB DNS name
+                # would fail the certificate check.
+                "WORKER_URL": self.public_base_url
+                or f"http://{self.fargate_service.load_balancer.load_balancer_dns_name}",
                 "APP_SECRET_ARN": app_secrets.secret_arn,
             },
             timeout=cdk.Duration.seconds(60),
@@ -331,6 +373,13 @@ def handler(event, context):
         # ── Outputs ───────────────────────────────────────────────────────────
         cdk.CfnOutput(
             self,
+            "PublicBaseUrl",
+            value=self.public_base_url or "http (no certificate_arn context set)",
+            description="Public base URL. Update MCP_SERVER_URL, WORKER_BASE_URL and "
+                        "GOOGLE_REDIRECT_URI in the poysis/app secret to match.",
+        )
+        cdk.CfnOutput(
+            self,
             "AlbDns",
             value=self.fargate_service.load_balancer.load_balancer_dns_name,
             description="ALB DNS - use this as your WORKER_BASE_URL",
@@ -338,7 +387,7 @@ def handler(event, context):
         cdk.CfnOutput(
             self,
             "EcrRepoUri",
-            value=self.ecr_repo.repository_uri,
+            value=f"440783445469.dkr.ecr.{self.region}.amazonaws.com/poysis-worker",
             description="ECR repo URI for docker push",
         )
         cdk.CfnOutput(

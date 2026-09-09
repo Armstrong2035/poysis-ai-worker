@@ -301,17 +301,57 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to log topic event: {e}")
 
+    # -- MCP tokens ----------------------------------------------------------
+
+    async def get_mcp_token_hash(self, workspace_id: str) -> Optional[str]:
+        """Return the stored SHA-256 hash for this workspace, or None."""
+        def _q():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT token_hash FROM mcp_tokens WHERE workspace_id = %s",
+                        (workspace_id,),
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else None
+        try:
+            return await _run(_q)
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to read mcp token: {e}")
+            return None
+
+    async def set_mcp_token_hash(self, workspace_id: str, token_hash: str) -> bool:
+        """Store the hash, replacing any existing one. Replacing revokes the old token."""
+        def _q():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO mcp_tokens (workspace_id, token_hash) VALUES (%s, %s) "
+                        "ON CONFLICT (workspace_id) DO UPDATE SET token_hash = EXCLUDED.token_hash, "
+                        "created_at = NOW()",
+                        (workspace_id, token_hash),
+                    )
+                conn.commit()
+                return True
+        try:
+            return await _run(_q)
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to store mcp token: {e}")
+            return False
+
     async def get_dashboard_analytics(self, workspace_id: str, days: int = 30) -> Optional[Dict[str, Any]]:
         """Calls the get_dashboard_analytics Postgres function (same as the old Supabase RPC)."""
         def _q():
             with _conn() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(
-                        "SELECT * FROM get_dashboard_analytics(%s, %s)",
+                        "SELECT get_dashboard_analytics(%s, %s) AS data",
                         (workspace_id, days),
                     )
                     row = cur.fetchone()
-                    return dict(row) if row else None
+                    # The function returns one jsonb value. SELECT * would wrap it
+                    # in a column named after the function, so select it by alias.
+                    return row["data"] if row else None
         try:
             return await _run(_q)
         except Exception as e:

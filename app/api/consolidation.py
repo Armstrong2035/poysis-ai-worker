@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import os
+import secrets
+import hashlib
 import time
 import traceback
 
@@ -595,12 +597,40 @@ async def cluster_status(workspace_id: str, user_id: str = Depends(get_user_id))
 
 def _generate_mcp_url(workspace_id: str) -> str:
     """
-    Per-workspace MCP server URL.
+    Per-workspace MCP endpoint address, without a credential.
+
     Path-based (not query-param) so each workspace has a distinct connector URL —
     matches the MCP Streamable HTTP transport convention.
+
+    This is the address only. It is safe to include in status payloads, which
+    are polled frequently. The endpoint rejects a request that arrives without a
+    token, so this URL is not usable on its own. Use _issue_mcp_url when the
+    user actually asks for a connector link.
     """
     mcp_base_url = os.getenv("MCP_SERVER_URL", "https://poysis-ai-worker-production.up.railway.app/mcp").rstrip("/")
     return f"{mcp_base_url}/{workspace_id}"
+
+
+async def _issue_mcp_url(workspace_id: str) -> str:
+    """
+    Mint a fresh token and return the connector URL that carries it.
+
+    The token rides in the query string because Claude.ai and ChatGPT connectors
+    accept a URL and nothing else — they cannot be told to send a header. The URL
+    is therefore the secret: it appears in load balancer logs, and anyone holding
+    it can read the workspace knowledge base.
+
+    Only the hash is stored, so a previous token cannot be read back. Each call
+    mints a new one and replaces the stored hash, which revokes the previous URL.
+    Call this when the user asks for a link, not on a status poll.
+    """
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    if not await db.set_mcp_token_hash(workspace_id, digest):
+        # Minting failed and is already logged. Return the bare address rather
+        # than a URL carrying a token the endpoint will reject.
+        return _generate_mcp_url(workspace_id)
+    return f"{_generate_mcp_url(workspace_id)}?token={token}"
 
 
 @router.post("/sync")
@@ -668,7 +698,9 @@ async def get_mcp_url(workspace_id: str, user_id: str = Depends(get_user_id)):
     not just after a snapshot completes.
     """
     await verify_workspace_ownership(workspace_id, user_id)
-    return {"workspace_id": workspace_id, "mcp_url": _generate_mcp_url(workspace_id)}
+    # Each call mints a new token and revokes the previous one, so the caller
+    # must show this URL to the user. An older connector URL stops working.
+    return {"workspace_id": workspace_id, "mcp_url": await _issue_mcp_url(workspace_id)}
 
 
 @router.get("/topics/{workspace_id}")
