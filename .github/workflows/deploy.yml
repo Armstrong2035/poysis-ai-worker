@@ -67,7 +67,13 @@ jobs:
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .compatibilities, .registeredAt, .registeredBy) |
             .containerDefinitions |= map(
-              if .name == "AppContainer" then .image = $IMAGE else . end
+              if .name == "AppContainer" then
+                .image = $IMAGE |
+                .environment = ((.environment // []) |
+                  map(select(.name != "HERMENEUTICS_ENABLED" and .name != "HERMENEUTICS_DEEPSEEK_MODEL")) +
+                  [{"name":"HERMENEUTICS_ENABLED","value":"true"},
+                   {"name":"HERMENEUTICS_DEEPSEEK_MODEL","value":"deepseek-v4-pro"}])
+              else . end
             )')
           NEW_TASK_DEFINITION_ARN=$(echo "$NEW_TASK_DEFINITION" | \
             aws ecs register-task-definition --cli-input-json file:///dev/stdin \

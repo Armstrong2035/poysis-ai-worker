@@ -1,4 +1,7 @@
 import os
+import asyncio
+import contextlib
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +11,8 @@ from app.blocks.recommendation.router import router as recommendation_router
 from app.blocks.clustering.router import router as clustering_router
 from app.api.tracking import router as tracking_router
 from app.api.analytics import router as analytics_router
+from app.api.marketing import router as marketing_router
+from app.api.interpretations import router as interpretations_router
 from app.api.auth import router as auth_router
 from app.api.consolidation import router as consolidation_router
 from app.api.mcp_http import router as mcp_router
@@ -31,7 +36,29 @@ async def lifespan(app: FastAPI):
     reaped = await DatabaseService().reap_stale_jobs(stale_after_seconds=0)
     if reaped:
         print(f"[STARTUP] Reaped {reaped} orphaned 'running' consolidation job(s)")
-    yield
+    interpretation_task = None
+    if os.getenv("HERMENEUTICS_ENABLED", "false").lower() == "true":
+        from hermeneutics.runtime import build_engine
+        engine = build_engine()
+        async def interpretation_loop():
+            while True:
+                try:
+                    result = await engine.run_next()
+                    if result is None:
+                        await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.getLogger(__name__).error("Interpretation worker unavailable; retrying")
+                    await asyncio.sleep(5)
+        interpretation_task = asyncio.create_task(interpretation_loop())
+    try:
+        yield
+    finally:
+        if interpretation_task:
+            interpretation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await interpretation_task
 
 
 app = FastAPI(title="Poysis Worker API", lifespan=lifespan)
@@ -67,6 +94,8 @@ app.include_router(clustering_router, prefix="/cluster")
 # Analytics & Tracking
 app.include_router(tracking_router)
 app.include_router(analytics_router)
+app.include_router(marketing_router)
+app.include_router(interpretations_router)
 # Auth
 app.include_router(auth_router)
 # Consolidation

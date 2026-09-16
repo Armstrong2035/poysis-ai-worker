@@ -138,6 +138,8 @@ class AppStack(cdk.Stack):
             "AWS_BEDROCK_REGION": self.region,
             "BEDROCK_OPENAI_BASE": f"https://bedrock-runtime.{self.region}.amazonaws.com/openai/v1",
             "BEDROCK_CHAT_MODEL": "openai.gpt-5.6-luna",
+            "HERMENEUTICS_ENABLED": "true",
+            "HERMENEUTICS_DEEPSEEK_MODEL": "deepseek-v4-pro",
         }
 
         # Helper to reference a key inside a JSON secret
