@@ -97,7 +97,13 @@ async def get_user_id(
     logged so you can tell when it is safe to turn the fallback off.
     """
     if authorization and authorization.lower().startswith("bearer "):
-        return _verify_bearer(authorization.split(" ", 1)[1].strip())
+        token = authorization.split(" ", 1)[1].strip()
+        # External API keys are fully verified by the scoped route dependency.
+        # Returning an inert principal here lets FastAPI reach that dependency;
+        # ordinary workspace checks grant this principal no access.
+        if token.startswith("poysis_live_"):
+            return "__poysis_api_key__"
+        return _verify_bearer(token)
 
     if x_user_id:
         if not _ALLOW_HEADER_FALLBACK:

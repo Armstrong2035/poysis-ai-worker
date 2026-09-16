@@ -13,6 +13,7 @@ MIGRATIONS = (
     "migrations_create_marketing_rules.sql",
     "migrations_create_keyword_planner_reports.sql",
     "migrations_create_interpretations.sql",
+    "migrations_create_api_platform.sql",
 )
 
 

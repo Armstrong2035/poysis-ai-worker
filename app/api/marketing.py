@@ -6,10 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import Field, ValidationError
 
 from app.api.security import get_user_id, verify_workspace_access
+from app.api.platform import get_key_store
 from app.primitives.database import DatabaseService
 from app.primitives.marketing.rules import OpportunityRule, StrictModel, TargetRequest, describe_rule
 from app.primitives.marketing.service import MarketingService
@@ -21,8 +22,27 @@ from typing import Literal
 
 router = APIRouter(prefix="/marketing", tags=["marketing"])
 logger = logging.getLogger(__name__)
-Scope = Annotated[str, Depends(verify_workspace_access)]
 TextQuery = Annotated[str, Query(min_length=1, max_length=200)]
+
+
+async def resolve_marketing_scope(workspace_id: str | None = None,
+                                  authorization: Annotated[str | None, Header()] = None,
+                                  user_id: str = Depends(get_user_id),
+                                  key_store=Depends(get_key_store)):
+    """User sessions use explicit workspace IDs; API keys derive their workspace."""
+    if authorization and authorization.startswith("Bearer poysis_live_"):
+        identity = await key_store.authenticate(authorization[7:].strip(), "marketing:read")
+        if identity is None:
+            raise HTTPException(401, "Invalid, expired, revoked, or insufficiently scoped API key")
+        if workspace_id and workspace_id != identity["workspace_id"]:
+            raise HTTPException(403, "API key is not authorized for that workspace")
+        return identity["workspace_id"]
+    if not workspace_id:
+        raise HTTPException(422, "workspace_id is required for user authentication")
+    return await verify_workspace_access(workspace_id, user_id)
+
+
+Scope = Annotated[str, Depends(resolve_marketing_scope)]
 
 
 def get_store():
