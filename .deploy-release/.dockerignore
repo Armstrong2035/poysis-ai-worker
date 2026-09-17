@@ -1,0 +1,38 @@
+# Git
+.git
+.github
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Data & Notebooks
+qdrant_storage/
+cache/
+*.pdf
+*.csv
+*.xlsx
+**/test-stuff/
+app/test-stuff/
+output.txt
+dataset_youtube*
+
+# OS
+.DS_Store
+Thumbs.db
