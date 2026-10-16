@@ -32,7 +32,7 @@ _PROVIDERS = {
 # Client sends a tier name, not a raw model ID — keeps model choice out of the
 # client and lets us swap the underlying model (or provider) without a client release.
 # On AWS: GPT-5.6 Luna via Bedrock for all tiers (fast, cheap, all billed to AWS).
-_BEDROCK_FAST_MODEL = os.getenv("BEDROCK_CHAT_MODEL", "openai.gpt-5-6-luna")
+_BEDROCK_FAST_MODEL = os.getenv("BEDROCK_CHAT_MODEL", "openai.gpt-5.6-luna")
 _TIER_MODELS = {
     "quick":    ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1-mini"),
     "thinking": ("openai", _BEDROCK_FAST_MODEL if _BEDROCK_OPENAI_BASE else "gpt-4.1"),

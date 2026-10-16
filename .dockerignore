@@ -12,6 +12,8 @@ env/
 venv/
 ENV/
 .env
+.env.bak*
+.env.aws.example
 .pytest_cache/
 .coverage
 htmlcov/
@@ -21,6 +23,19 @@ htmlcov/
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+# Deployment artifacts & non-runtime dirs (excluded to keep the image lean and
+# avoid permission-denied build contexts from .pytest_cache copies)
+.deploy-api/
+.deploy-main/
+.deploy-release/
+UserssubarOneDriveDesktopProjectspoysis-clientappsstudio/
+infra/
+docs/
+tests/
+client-integration/
+.client-domain/
+.client-platform/
 
 # Data & Notebooks
 qdrant_storage/

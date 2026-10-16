@@ -9,9 +9,9 @@ from app.primitives.knowledge.vector_store import VectorService
 from app.primitives.consolidation import embedding_cluster
 
 # Bedrock model used for topic naming, hierarchy, and story detection.
-# Claude 3.5 Haiku: fast, cheap, strong enough for JSON-structured categorization.
+# Claude Haiku 4.5: fast, cheap, strong enough for JSON-structured categorization.
 # Falls back to Gemini if AWS creds are not present (local dev).
-BEDROCK_CATEGORIZER_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
+BEDROCK_CATEGORIZER_MODEL = "anthropic.claude-haiku-4-5-20251001-v1:0"
 GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite-preview"
 MIN_DOCS_FOR_EMBEDDING_CLUSTER = 10
 
