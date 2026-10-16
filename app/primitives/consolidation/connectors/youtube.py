@@ -8,6 +8,7 @@ Only yields videos longer than MIN_DURATION_SECONDS to skip shorts and
 music videos that never carry sermon transcripts.
 """
 import asyncio
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -146,12 +147,16 @@ class YouTubeConnector(BaseConnector):
 
         Backend is chosen by YT_CAPTIONS_BACKEND: "ytdlp" routes through yt-dlp, which
         reaches YouTube's caption endpoint with the same hardened client it uses for video
-        info — surviving the datacenter-IP blocks that 429 the default library. Anything
-        else (default) keeps the youtube-transcript-api path. Both emit the same shape.
+        info — surviving the datacenter-IP blocks that 429 the default library. "apify"
+        routes through the karamelo/youtube-full-channel-transcripts-extractor actor,
+        which uses Apify's own proxy pool instead of ours. Anything else (default) keeps
+        the youtube-transcript-api path. All three emit the same shape.
         """
         backend = os.getenv("YT_CAPTIONS_BACKEND", "library").lower()
         if backend == "ytdlp":
             return await self._fetch_segments_ytdlp(item)
+        if backend == "apify":
+            return await self._fetch_segments_apify(item)
         return await self._fetch_segments_library(item)
 
     async def _fetch_segments_library(self, item: RawSourceItem) -> List[dict]:
@@ -180,6 +185,39 @@ class YouTubeConnector(BaseConnector):
         segments = await asyncio.to_thread(_ytdlp_json3_segments, item.url, item.source_id)
         if not segments:
             raise RuntimeError(f"No captions for video {item.source_id} (yt-dlp)")
+        return segments
+
+    async def _fetch_segments_apify(self, item: RawSourceItem) -> List[dict]:
+        """Apify actor path. Needs APIFY_TOKEN. One run per video — fine for the async
+        snapshot pipeline, not a sync request handler. See APIFY_YOUTUBE_TRANSCRIPTS.md
+        for the field-name verification this mapping is based on."""
+        token = os.getenv("APIFY_TOKEN")
+        if not token:
+            raise RuntimeError("APIFY_TOKEN is not set")
+        url = (
+            "https://api.apify.com/v2/acts/karamelo~youtube-full-channel-transcripts-extractor"
+            "/run-sync-get-dataset-items"
+        )
+        payload = {"urls": [item.url], "outputFormat": "json3", "maxVideos": 1, "maxRetries": 5}
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(url, params={"token": token}, json=payload)
+            response.raise_for_status()
+            items = response.json()
+        if not items or items[0].get("status") != "OK":
+            reason = items[0].get("reason") if items else "empty result"
+            raise RuntimeError(f"No captions for video {item.source_id} (apify): {reason}")
+        events = json.loads(items[0]["captions"]).get("events", [])
+        segments = [
+            {
+                "start": event["tStartMs"] / 1000,
+                "duration": event.get("dDurationMs", 0) / 1000,
+                "text": "".join(seg.get("utf8", "") for seg in event.get("segs", [])),
+            }
+            for event in events
+            if event.get("segs")
+        ]
+        if not segments:
+            raise RuntimeError(f"No captions for video {item.source_id} (apify): empty events")
         return segments
 
     async def fetch_text(self, item: RawSourceItem) -> str:

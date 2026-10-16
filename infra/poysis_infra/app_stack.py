@@ -141,6 +141,10 @@ class AppStack(cdk.Stack):
             "BEDROCK_CHAT_MODEL": "openai.gpt-5.6-luna",
             "HERMENEUTICS_ENABLED": "true",
             "HERMENEUTICS_DEEPSEEK_MODEL": "deepseek-v4-pro",
+            # YT_DLP_PROXY's account stopped relaying traffic (every HTTPS destination
+            # fails the TLS handshake through it, not just YouTube) — route captions
+            # through Apify's actor instead until the proxy account is sorted out.
+            "YT_CAPTIONS_BACKEND": "apify",
         }
 
         # Cognito verification material — non-secret, so set it directly in the
@@ -175,6 +179,7 @@ class AppStack(cdk.Stack):
             # YouTube
             "YOUTUBE_API_KEY":       _secret_val(app_secrets, "YOUTUBE_API_KEY"),
             "YT_DLP_PROXY":          _secret_val(app_secrets, "YT_DLP_PROXY"),
+            "APIFY_TOKEN":           _secret_val(app_secrets, "APIFY_TOKEN"),
             # Nango
             "NANGO_BASE_URL":        _secret_val(app_secrets, "NANGO_BASE_URL"),
             "NANGO_SECRET_KEY":      _secret_val(app_secrets, "NANGO_SECRET_KEY"),
