@@ -12,6 +12,7 @@ import aws_cdk as cdk
 from poysis_infra.network_stack import NetworkStack
 from poysis_infra.data_stack import DataStack
 from poysis_infra.secrets_stack import SecretsStack
+from poysis_infra.auth_stack import AuthStack
 from poysis_infra.app_stack import AppStack
 
 app = cdk.App()
@@ -24,12 +25,14 @@ env = cdk.Environment(
 network = NetworkStack(app, "PoisysNetwork", env=env)
 secrets = SecretsStack(app, "PoisysSecrets", env=env)
 data = DataStack(app, "PoisysData", vpc=network.vpc, env=env)
+auth = AuthStack(app, "PoisysAuth", env=env)
 AppStack(
     app,
     "PoisysApp",
     vpc=network.vpc,
     rds_secret=data.rds_secret,
     app_secrets=secrets.app_secrets,
+    auth=auth,
     env=env,
 )
 

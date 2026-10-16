@@ -50,6 +50,7 @@ class AppStack(cdk.Stack):
         vpc: ec2.Vpc,
         rds_secret: sm.Secret,
         app_secrets: sm.Secret,
+        auth=None,
         **kwargs,
     ):
         super().__init__(scope, id, **kwargs)
@@ -141,6 +142,19 @@ class AppStack(cdk.Stack):
             "HERMENEUTICS_ENABLED": "true",
             "HERMENEUTICS_DEEPSEEK_MODEL": "deepseek-v4-pro",
         }
+
+        # Cognito verification material — non-secret, so set it directly in the
+        # task definition. AUTH_ISSUER/AUTH_AUDIENCE are checked only when set
+        # (see app/api/security.py). AUTH_JWKS_URL switches the worker from the
+        # legacy Supabase HS256 secret to Cognito's RS256 JWKS.
+        if auth is not None:
+            environment.update(
+                {
+                    "AUTH_JWKS_URL": auth.jwks_url,
+                    "AUTH_ISSUER": auth.issuer,
+                    "AUTH_AUDIENCE": auth.web_client.user_pool_client_id,
+                }
+            )
 
         # Helper to reference a key inside a JSON secret
         def _secret_val(secret: sm.Secret, key: str) -> ecs.Secret:

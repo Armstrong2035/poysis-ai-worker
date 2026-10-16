@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 #                      is https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/jwks.json
 #
 # Set AUTH_ISSUER and AUTH_AUDIENCE when the provider issues them; each is
-# checked only when set.
+# checked only when set. For Cognito, AUTH_AUDIENCE is the app client id and
+# AUTH_ISSUER is https://cognito-idp.<region>.amazonaws.com/<pool-id>.
 _JWT_SECRET = os.getenv("AUTH_JWT_SECRET")
 _JWKS_URL = os.getenv("AUTH_JWKS_URL")
 _ISSUER = os.getenv("AUTH_ISSUER")
@@ -44,17 +45,21 @@ def _get_jwk_client():
 
 
 def _verify_bearer(token: str) -> str:
-    """Verify the token and return its subject. Raises 401 on any failure."""
+    """Verify the token and return its subject. Raises 401 on any failure.
+
+    Supports legacy Supabase HS256 JWTs and Cognito RS256/ES256 JWTs. Cognito
+    access tokens carry `client_id` (not `aud`), so the audience is checked
+    manually below against either claim.
+    """
     import jwt
 
-    options = {"verify_aud": bool(_AUDIENCE)}
+    options = {"verify_aud": False}
     try:
         if _JWT_SECRET:
             claims = jwt.decode(
                 token,
                 _JWT_SECRET,
                 algorithms=["HS256"],
-                audience=_AUDIENCE,
                 issuer=_ISSUER,
                 options=options,
             )
@@ -64,7 +69,6 @@ def _verify_bearer(token: str) -> str:
                 token,
                 signing_key.key,
                 algorithms=["RS256", "ES256"],
-                audience=_AUDIENCE,
                 issuer=_ISSUER,
                 options=options,
             )
@@ -78,6 +82,23 @@ def _verify_bearer(token: str) -> str:
     except Exception as e:
         logger.warning(f"[AUTH] token rejected: {type(e).__name__}: {e}")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Audience check. Cognito access tokens use `client_id`; legacy Supabase and
+    # Cognito ID tokens use `aud`. Accept either when AUTH_AUDIENCE is set.
+    if _AUDIENCE:
+        aud = claims.get("aud")
+        aud_match = (
+            aud == _AUDIENCE
+            if isinstance(aud, str)
+            else (isinstance(aud, list) and _AUDIENCE in aud)
+        )
+        if not aud_match and claims.get("client_id") != _AUDIENCE:
+            raise HTTPException(status_code=401, detail="Token audience does not match")
+
+    # A Cognito access token must be used as an access token, never an ID token.
+    token_use = claims.get("token_use")
+    if token_use and token_use != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
 
     subject = claims.get("sub")
     if not subject:
@@ -127,6 +148,7 @@ async def verify_workspace_access(
     """
     Verify that the user has access to the specified workspace.
     Checks workspace_members table; falls back to workspace owner check for backward compatibility.
+    Also enforces the tenant boundary when the workspace belongs to a tenant.
     Returns the workspace_id if valid, raises 403 if not.
     """
     if not db.client:
@@ -139,23 +161,45 @@ async def verify_workspace_access(
 
         # Check workspace_members table (new multi-user architecture)
         has_access = await db.has_workspace_access(workspace_id, user_id)
-        if has_access:
-            return workspace_id
+        if not has_access:
+            # Fallback: Check if user owns the workspace (legacy single-user architecture)
+            workspace_user = workspace.get("user_id")
+            if workspace_user and workspace_user == user_id:
+                # Auto-add owner to members table for future consistency
+                await db.add_workspace_member(workspace_id, user_id, role="owner")
+            else:
+                raise HTTPException(status_code=403, detail="You do not have access to this workspace")
 
-        # Fallback: Check if user owns the workspace (legacy single-user architecture)
-        workspace_user = workspace.get("user_id")
-        if workspace_user and workspace_user == user_id:
-            # Auto-add owner to members table for future consistency
-            await db.add_workspace_member(workspace_id, user_id, role="owner")
-            return workspace_id
+        # Tenant boundary: when the workspace belongs to a tenant, the caller
+        # must also be a member of that tenant. Skipped while tenant_id is NULL
+        # (tenants are provisioned lazily during the migration).
+        tenant_id = workspace.get("tenant_id")
+        if tenant_id:
+            await verify_tenant_access(str(tenant_id), user_id)
 
-        raise HTTPException(status_code=403, detail="You do not have access to this workspace")
+        return workspace_id
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"[SECURITY] Error verifying workspace access: {e}")
         raise HTTPException(status_code=500, detail="Failed to verify workspace")
+
+
+async def verify_tenant_access(tenant_id: str, user_id: str) -> str:
+    """Verify the user is a member of the tenant. Returns tenant_id or raises 403."""
+    from app.primitives.tenant_store import TenantStore
+
+    try:
+        role = await TenantStore().is_member(tenant_id, user_id)
+        if not role:
+            raise HTTPException(status_code=403, detail="You do not have access to this organization")
+        return tenant_id
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[SECURITY] Error verifying tenant access: {e}")
+        raise HTTPException(status_code=500, detail="Failed to verify organization")
 
 
 # Keep the old name for backward compatibility
