@@ -1,3 +1,0 @@
-[deploy]
-healthcheckPath = "/ping"
-healthcheckTimeout = 120
