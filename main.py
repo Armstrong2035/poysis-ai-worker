@@ -14,6 +14,7 @@ from app.api.analytics import router as analytics_router
 from app.api.marketing import router as marketing_router
 from app.api.interpretations import router as interpretations_router
 from app.api.platform import router as platform_router, public_router
+from app.api.client import router as client_router, public_router as client_public_router
 from app.api.auth import router as auth_router
 from app.api.consolidation import router as consolidation_router
 from app.api.mcp_http import router as mcp_router
@@ -99,6 +100,9 @@ app.include_router(marketing_router)
 app.include_router(interpretations_router)
 app.include_router(platform_router)
 app.include_router(public_router)
+# Frontend app data (formerly Supabase/RLS) — Cognito-scoped
+app.include_router(client_router)
+app.include_router(client_public_router)
 # Auth
 app.include_router(auth_router)
 # Consolidation
