@@ -60,18 +60,27 @@ jobs:
         env:
           IMAGE: ${{ steps.build-image.outputs.image }}
         run: |
-          TASK_DEFINITION=$(aws ecs describe-task-definition \
+          aws ecs describe-task-definition \
             --task-definition poysis-worker \
-            --query taskDefinition)
-          NEW_TASK_DEFINITION=$(echo "$TASK_DEFINITION" | jq --arg IMAGE "$IMAGE" '
+            --query taskDefinition > task-definition.json
+          jq --arg IMAGE "$IMAGE" '
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .compatibilities, .registeredAt, .registeredBy) |
             .containerDefinitions |= map(
-              if .name == "AppContainer" then .image = $IMAGE else . end
-            )')
-          NEW_TASK_DEFINITION_ARN=$(echo "$NEW_TASK_DEFINITION" | \
-            aws ecs register-task-definition --cli-input-json file:///dev/stdin \
-              --query 'taskDefinition.taskDefinitionArn' --output text)
+              if .name == "AppContainer" then
+                .image = $IMAGE |
+                .environment = ((.environment // []) |
+                  map(select(.name != "HERMENEUTICS_ENABLED" and .name != "HERMENEUTICS_DEEPSEEK_MODEL")) +
+                  [{"name":"HERMENEUTICS_ENABLED","value":"true"},
+                   {"name":"HERMENEUTICS_DEEPSEEK_MODEL","value":"deepseek-v4-pro"}])
+              else . end
+            )' task-definition.json > new-task-definition.json
+          # A real file, not file:///dev/stdin — the CLI treats cli-input-json as a
+          # seekable file, which a piped stream is not, and silently reads nothing
+          # on some platforms ("Invalid JSON received") rather than erroring loudly.
+          NEW_TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
