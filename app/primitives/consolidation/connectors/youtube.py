@@ -28,9 +28,12 @@ class YouTubeConnector(BaseConnector):
         channel_ids: List[str],
         min_duration_seconds: int = MIN_DURATION_SECONDS,
         channel_connections: Optional[Dict[str, str]] = None,
+        playlist_ids: Optional[List[str]] = None,
     ):
         self.channel_ids = channel_ids
         self.min_duration_seconds = min_duration_seconds
+        # When set, these playlists replace each channel's uploads playlist.
+        self.playlist_ids = playlist_ids or []
         # channel_id -> connection id (youtube_channels.id); tags each yielded item.
         self.channel_connections = channel_connections or {}
         self.api_key = os.environ.get("YOUTUBE_API_KEY", "")
@@ -48,85 +51,95 @@ class YouTubeConnector(BaseConnector):
 
         limit = scope.doc_limit if scope.doc_limit != -1 else float("inf")
         fetched = 0
+        # One video can be in two of the selected playlists. Yield it once.
+        seen: set = set()
 
         async with httpx.AsyncClient(timeout=30) as client:
             for channel_id in self.channel_ids:
-                # Enumerate via the channel's uploads playlist, not search.list.
-                # search.list stops paginating at ~500 results however many videos
-                # the channel has — it silently capped a 1,600-video channel — and
-                # costs 100 quota units per call against a 10,000/day budget.
-                # playlistItems pages the full catalogue at 1 unit per call.
-                uploads_playlist_id = await _uploads_playlist_id(client, channel_id, self.api_key)
-                if not uploads_playlist_id:
-                    raise RuntimeError(f"Channel {channel_id} has no uploads playlist")
+                if self.playlist_ids:
+                    playlist_ids = self.playlist_ids
+                else:
+                    # Enumerate via the channel's uploads playlist, not search.list.
+                    # search.list stops paginating at ~500 results however many videos
+                    # the channel has — it silently capped a 1,600-video channel — and
+                    # costs 100 quota units per call against a 10,000/day budget.
+                    # playlistItems pages the full catalogue at 1 unit per call.
+                    uploads_playlist_id = await _uploads_playlist_id(client, channel_id, self.api_key)
+                    if not uploads_playlist_id:
+                        raise RuntimeError(f"Channel {channel_id} has no uploads playlist")
+                    playlist_ids = [uploads_playlist_id]
 
-                page_token: str | None = None
-                while fetched < limit:
-                    params: dict = {
-                        "part": "snippet,contentDetails",
-                        "playlistId": uploads_playlist_id,
-                        "maxResults": 50,
-                        "key": self.api_key,
-                    }
-                    if page_token:
-                        params["pageToken"] = page_token
+                for playlist_id in playlist_ids:
+                    page_token: str | None = None
+                    while fetched < limit:
+                        params: dict = {
+                            "part": "snippet,contentDetails",
+                            "playlistId": playlist_id,
+                            "maxResults": 50,
+                            "key": self.api_key,
+                        }
+                        if page_token:
+                            params["pageToken"] = page_token
 
-                    data = await _get_with_retry(client, f"{_YT_API}/playlistItems", params)
+                        data = await _get_with_retry(client, f"{_YT_API}/playlistItems", params)
 
-                    # Collect video IDs and metadata from this page
-                    page_items = []
-                    for entry in data.get("items", []):
-                        details = entry.get("contentDetails", {})
-                        snippet = entry.get("snippet", {})
-                        video_id = details.get("videoId") or snippet.get("resourceId", {}).get("videoId")
-                        if not video_id:
-                            continue  # deleted or private entry
-                        page_items.append({
-                            "video_id": video_id,
-                            # playlistItems dates the *addition*; videoPublishedAt is
-                            # the upload date, and it is what etag/last_modified mean.
-                            "published_at": details.get("videoPublishedAt")
-                            or snippet.get("publishedAt", ""),
-                            "title": snippet.get("title", "Untitled"),
-                        })
-                    self.listed_total += len(page_items)
+                        # Collect video IDs and metadata from this page
+                        page_items = []
+                        for entry in data.get("items", []):
+                            details = entry.get("contentDetails", {})
+                            snippet = entry.get("snippet", {})
+                            video_id = details.get("videoId") or snippet.get("resourceId", {}).get("videoId")
+                            if not video_id:
+                                continue  # deleted or private entry
+                            page_items.append({
+                                "video_id": video_id,
+                                # playlistItems dates the *addition*; videoPublishedAt is
+                                # the upload date, and it is what etag/last_modified mean.
+                                "published_at": details.get("videoPublishedAt")
+                                or snippet.get("publishedAt", ""),
+                                "title": snippet.get("title", "Untitled"),
+                            })
+                        self.listed_total += len(page_items)
 
-                    # Batch-fetch durations (1 quota unit per 50 videos)
-                    durations = await _fetch_durations(
-                        client, [p["video_id"] for p in page_items], self.api_key
-                    )
-
-                    for item in page_items:
-                        video_id = item["video_id"]
-                        duration_s = durations.get(video_id, 0)
-                        if duration_s < self.min_duration_seconds:
-                            self.skipped_short += 1
-                            continue  # skip shorts and clips
-
-                        published_at = item["published_at"]
-                        last_modified = (
-                            datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-                            if published_at
-                            else datetime.now(timezone.utc)
+                        # Batch-fetch durations (1 quota unit per 50 videos)
+                        durations = await _fetch_durations(
+                            client, [p["video_id"] for p in page_items], self.api_key
                         )
-                        yield RawSourceItem(
-                            source_id=video_id,
-                            source_type="youtube",
-                            title=item["title"],
-                            url=f"https://www.youtube.com/watch?v={video_id}",
-                            etag=published_at or video_id,
-                            last_modified=last_modified,
-                            content_type="document",
-                            size_bytes=0,
-                            connection_id=self.channel_connections.get(channel_id),
-                        )
-                        fetched += 1
-                        if fetched >= limit:
-                            return
 
-                    page_token = data.get("nextPageToken")
-                    if not page_token:
-                        break
+                        for item in page_items:
+                            video_id = item["video_id"]
+                            if video_id in seen:
+                                continue  # already yielded from another playlist
+                            seen.add(video_id)
+                            duration_s = durations.get(video_id, 0)
+                            if duration_s < self.min_duration_seconds:
+                                self.skipped_short += 1
+                                continue  # skip shorts and clips
+
+                            published_at = item["published_at"]
+                            last_modified = (
+                                datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                                if published_at
+                                else datetime.now(timezone.utc)
+                            )
+                            yield RawSourceItem(
+                                source_id=video_id,
+                                source_type="youtube",
+                                title=item["title"],
+                                url=f"https://www.youtube.com/watch?v={video_id}",
+                                etag=published_at or video_id,
+                                last_modified=last_modified,
+                                content_type="document",
+                                size_bytes=0,
+                                connection_id=self.channel_connections.get(channel_id),
+                            )
+                            fetched += 1
+                            if fetched >= limit:
+                                return
+
+                        page_token = data.get("nextPageToken")
+                        if not page_token:
+                            break
 
     async def fetch_segments(self, item: RawSourceItem) -> List[dict]:
         """Return raw transcript segments: [{start, duration, text}, ...].

@@ -11,7 +11,7 @@ Both entry points (the `seed_bot.py` CLI and the seed-mode branch of
 """
 import os
 import uuid
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from app.primitives.consolidation.clustering import ClusteringEngine
 from app.primitives.consolidation.connectors.youtube import resolve_channel
@@ -82,6 +82,7 @@ async def ingest_and_cluster(
     doc_limit: int = 500,
     skip_clustering: bool = False,
     progress_callback: Optional[Callable[[Dict], None]] = None,
+    playlist_ids: Optional[List[str]] = None,
 ) -> Dict:
     """Run the snapshot to completion, then build topics. Returns run totals."""
     yt_channels = await db.get_youtube_channels(workspace_id)
@@ -92,6 +93,7 @@ async def ingest_and_cluster(
         youtube_channel_connections={c["channel_id"]: c["id"] for c in yt_channels},
         youtube_min_duration_seconds=min_duration_seconds,
         doc_limit=doc_limit,
+        youtube_playlist_ids=playlist_ids or [],
     )
 
     engine = ConsolidationEngine(db=db)

@@ -35,6 +35,10 @@ class ScopeConfig(BaseModel):
     # typical upload is shorter. Shorts are <=60s, so ~120 is the floor that still
     # filters them out.
     youtube_min_duration_seconds: int = 2700
+    # Ingest only these playlists instead of the channel's whole uploads list. A large
+    # channel takes hours to ingest one video at a time; a playlist is a curated subset.
+    # Not persisted per channel — a later full sync of the workspace ingests the channel.
+    youtube_playlist_ids: List[str] = []
 
     @model_validator(mode="after")
     def at_least_one_source(self):

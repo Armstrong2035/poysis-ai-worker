@@ -7,6 +7,7 @@ Usage:
     python seed_bot.py "https://youtube.com/@somechannel"
     python seed_bot.py "@somechannel" --name "Jane Doe" --min-duration 900
     python seed_bot.py "UCxxxxxxxxxxxxxxxxxxxxxx" --dry-run
+    python seed_bot.py "@ycombinator" --playlist PLxxxx --playlist PLyyyy --min-duration 300
 
 The owning account comes from POYSIS_SEED_USER_ID (or --user-id). Poysis seeds and
 owns these workspaces; ownership transfers to the expert when they claim the bot.
@@ -40,6 +41,8 @@ def _parse_args():
              "silently excludes everything on a channel of shorter talks. Shorts are <=60s. "
              "Persisted per channel, so later syncs reuse it.",
     )
+    p.add_argument("--playlist", action="append", default=[], metavar="PLAYLIST_ID",
+                   help="Ingest only this playlist (repeatable). Default: the whole channel.")
     p.add_argument("--doc-limit", type=int, default=500, help="Max videos to ingest (-1 = unlimited)")
     p.add_argument("--user-id", default=os.getenv("POYSIS_SEED_USER_ID", ""),
                    help="Owning account (default: $POYSIS_SEED_USER_ID)")
@@ -66,6 +69,7 @@ async def main():
     print(f"Channel  : {_safe(channel_title)}  ({channel_id})")
     print(f"Bot name : {_safe(name)}")
     print(f"Min video: {args.min_duration}s ({args.min_duration / 60:.0f}min)")
+    print(f"Playlists: {', '.join(args.playlist) if args.playlist else 'all uploads'}")
 
     if args.dry_run:
         print("\n[dry-run] Would create a new workspace, attach this channel, and ingest.")
@@ -94,6 +98,7 @@ async def main():
         doc_limit=args.doc_limit,
         skip_clustering=args.skip_clustering,
         progress_callback=_on_progress,
+        playlist_ids=args.playlist,
     )
 
     print(" " * 78, end="\r")
