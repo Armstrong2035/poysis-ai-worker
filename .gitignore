@@ -33,3 +33,17 @@ Thumbs.db
 .gemini/
 .agent/
 .mcp.json
+
+# AWS CDK
+infra/cdk.out/
+infra/cdk.context.json
+infra/.cdk.staging/
+
+# Local deploy worktrees and reference copies from another repo. Never
+# commit these — see the Docker build context exclusions in .dockerignore.
+.deploy-api/
+.deploy-release/
+.client-domain/
+.client-platform/
+UserssubarOneDriveDesktopProjectspoysis-client*/
+

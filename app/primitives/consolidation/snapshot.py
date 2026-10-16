@@ -25,12 +25,14 @@ def _youtube_connector(
     channel_ids: List[str],
     min_duration_seconds: int,
     channel_connections: Optional[Dict[str, str]] = None,
+    playlist_ids: Optional[List[str]] = None,
 ):
     from app.primitives.consolidation.connectors.youtube import YouTubeConnector
     return YouTubeConnector(
         channel_ids=channel_ids,
         min_duration_seconds=min_duration_seconds,
         channel_connections=channel_connections,
+        playlist_ids=playlist_ids,
     )
 
 
@@ -109,7 +111,9 @@ class SnapshotRunner:
 
         if self.scope.youtube_channel_ids:
             yt_connector = _youtube_connector(
-                self.scope.youtube_channel_ids, self.scope.youtube_min_duration_seconds
+                self.scope.youtube_channel_ids,
+                self.scope.youtube_min_duration_seconds,
+                playlist_ids=self.scope.youtube_playlist_ids,
             )
             async for item in yt_connector.list_items(self.scope):
                 total_files += 1
@@ -259,6 +263,7 @@ class SnapshotRunner:
                 self.scope.youtube_channel_ids,
                 self.scope.youtube_min_duration_seconds,
                 self.scope.youtube_channel_connections,
+                self.scope.youtube_playlist_ids,
             )
             yt_tasks = []
             yt_queue: asyncio.Queue = asyncio.Queue()

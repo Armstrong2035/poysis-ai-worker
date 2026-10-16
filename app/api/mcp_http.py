@@ -18,6 +18,8 @@ Tools:
 import traceback
 from typing import Any, Dict, List, Optional
 
+import hashlib
+import hmac
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -116,6 +118,31 @@ def _tool_content(text: str, is_error: bool = False) -> Dict[str, Any]:
     if is_error:
         payload["isError"] = True
     return payload
+
+
+async def _verify_mcp_token(workspace_id: str, request: Request) -> None:
+    """
+    Check the per-workspace token before any tool runs.
+
+    The token may arrive as "Authorization: Bearer <token>" or as ?token=<token>.
+    The query form exists because Claude.ai connectors can only be given a URL.
+    Comparison is constant time against the stored SHA-256 hash.
+    """
+    supplied = request.query_params.get("token")
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        supplied = auth.split(" ", 1)[1].strip()
+
+    if not supplied:
+        raise HTTPException(status_code=401, detail="Missing MCP token")
+
+    stored = await db.get_mcp_token_hash(workspace_id)
+    if not stored:
+        raise HTTPException(status_code=401, detail="No MCP token issued for this workspace")
+
+    digest = hashlib.sha256(supplied.encode()).hexdigest()
+    if not hmac.compare_digest(digest, stored):
+        raise HTTPException(status_code=401, detail="Invalid MCP token")
 
 
 async def _validate_workspace(workspace_id: str) -> None:
@@ -291,6 +318,7 @@ async def mcp_endpoint(workspace_id: str, request: Request):
             continue
 
         try:
+            await _verify_mcp_token(workspace_id, request)
             result = await _dispatch(method, params, workspace_id)
             # Notifications (no id) get no response.
             if req_id is None:
@@ -313,11 +341,15 @@ async def mcp_endpoint(workspace_id: str, request: Request):
 
 
 @router.get("/{workspace_id}")
-async def mcp_endpoint_info(workspace_id: str):
+async def mcp_endpoint_info(workspace_id: str, request: Request):
     """
     Browser/curl-friendly description. Real MCP traffic is POST.
     Useful for users sanity-checking their connector URL.
+
+    Requires the same token as POST. Without it this route would confirm which
+    workspace ids exist to anyone who guesses one.
     """
+    await _verify_mcp_token(workspace_id, request)
     await _validate_workspace(workspace_id)
     return {
         "workspace_id": workspace_id,

@@ -1,10 +1,11 @@
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import os
 import tempfile
 import shutil
-from app.primitives.knowledge.engine import get_knowledge_engine
+from app.primitives.knowledge.engine import KnowledgeEngine
 from app.primitives.knowledge.vector_store import VectorService
 from app.primitives.knowledge.embedder import Embedder
 from app.api.security import get_user_id, verify_workspace_ownership
@@ -56,7 +57,7 @@ async def search_documents(
     await _authorize_notebook(request.notebook_id, user_id)
 
     try:
-        engine = get_knowledge_engine()
+        engine = KnowledgeEngine()
         
         # Delegate raw fetch to the Engine (no opinions)
         raw_results = await engine.fetch_raw(
@@ -151,7 +152,7 @@ async def ingest_file(
         print(f"[INGEST-FILE] Received '{file.filename}' ({file.content_type}) for notebook '{notebook_id}'")
 
         # 4. Run the Ingestion Pipeline
-        engine = get_knowledge_engine()
+        engine = KnowledgeEngine()
         count = await engine.ingest_file(notebook_id, tmp_path)
 
         return {
@@ -201,7 +202,7 @@ async def query_knowledge_base(
 
         # Use the SAME embedder + namespace that consolidation wrote with.
         # Embedder mismatch silently returns garbage scores; namespace mismatch returns nothing.
-        engine = get_knowledge_engine()
+        engine = KnowledgeEngine()
         namespace = f"consolidation_{request.workspace_id}"
 
         raw_results = await engine.fetch_raw(

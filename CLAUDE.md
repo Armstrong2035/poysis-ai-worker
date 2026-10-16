@@ -18,5 +18,6 @@ These rules apply to every task in this project unless explicitly overridden. Bi
 10. **Checkpoint after every significant step.** Summarize what was done, what's verified, what's left. Don't continue from a state you can't describe back.
 11. **Match the codebase's conventions, even if you disagree.** Conformance beats taste inside the codebase. If a convention is genuinely harmful, surface it — don't fork silently.
 12. **Fail loud.** "Completed" is wrong if anything was skipped silently. "Tests pass" is wrong if any were skipped. Default to surfacing uncertainty, not hiding it.
+13. **Write in Simplified Technical English (ASD-STE100).** Applies to all prose: chat replies, docs, commit messages, code comments. One word, one meaning. Use the active voice. Keep sentences short — max 20 words for instructions, 25 for description. One instruction per sentence. Use the article ("the", "a") — do not drop it. No jargon, slang, or metaphor when a plain word works. Do not use `-ing` forms as nouns or adjectives when a simpler form exists. Technical names (`FargateService`, `pgvector`, `workspace_id`) stay as they are.
 
 See `README.md` for what this project is and how it's built.

@@ -5,6 +5,7 @@ Middleware for logging, error handling, and rate limiting.
 import time
 import json
 import logging
+import hashlib
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -63,7 +64,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.limit_per_minute = 100
 
     async def dispatch(self, request: Request, call_next):
-        user_id = request.headers.get("X-User-ID", "anonymous")
+        user_id = request.headers.get("X-User-ID")
+        if not user_id:
+            authorization = request.headers.get("Authorization", "")
+            user_id = ("bearer:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:16]
+                       if authorization else "anonymous")
         now = datetime.utcnow()
         minute_ago = now - timedelta(minutes=1)
 

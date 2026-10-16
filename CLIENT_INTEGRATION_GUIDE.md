@@ -126,7 +126,7 @@ Send the transcript and it resolves:
 __SOURCES__<json>\n\n<answer tokens streamed…>\n\n__META__<json>
 ```
 
-Same payload, same `__META__` position — only the sources move. Today you can't render anything until the whole answer finishes generating; with this you paint source cards the moment retrieval lands and stream prose into place.
+Same payload, same `__META__` position — only the sources move. Today the prose streams first and the **source cards can't appear until the answer has finished generating**; with this they land the moment retrieval does, and the prose streams in underneath them. Measured against production, that's cards at under 3s instead of ~10s.
 
 ⚠️ **It changes the byte order.** Ship the parser change first, then flip the flag — otherwise the client prints `__SOURCES__{…}` as answer text. This will become the default once clients have migrated.
 
@@ -355,6 +355,8 @@ On `done` you also get `leaf_topics`, `total_topics`, `hierarchy_depth`, `iterat
 
 ## TL;DR checklist for the frontend
 - [ ] **Chat:** handle the leading `__MODE__` marker (or pin `mode:"synthesis"` to defer). This is the only breaking change.
+- [ ] **Chat memory:** send `history` (last few `{role, content}` turns, excluding the current `query`). Until you do, every turn stays standalone and follow-ups like "tell me more" don't work. Non-breaking — omit it and behaviour is unchanged.
+- [ ] **Chat sources-first:** update the parser to accept `__SOURCES__` as the *first* bytes, **then** send `sources_first: true`. Non-breaking until you flip it; do it in that order or the marker renders as answer text.
 - [ ] **Playlists:** build the browse/import UI on the two new `/sources/youtube/playlists…` endpoints; use returned `topic_id`s as categories.
 - [ ] **Transcripts:** nothing — just works now.
 - [ ] **Snapshot/discover:** always send a non-empty `sources` array listing every connected source. Breaking — omitting it is now a 422.
