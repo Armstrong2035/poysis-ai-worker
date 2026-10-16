@@ -320,16 +320,17 @@ class DatabaseService:
             print(f"[DATABASE ERROR] Failed to read mcp token: {e}")
             return None
 
-    async def set_mcp_token_hash(self, workspace_id: str, token_hash: str) -> bool:
+    async def set_mcp_token_hash(self, workspace_id: str, token_hash: str, tenant_id: Optional[str] = None) -> bool:
         """Store the hash, replacing any existing one. Replacing revokes the old token."""
         def _q():
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO mcp_tokens (workspace_id, token_hash) VALUES (%s, %s) "
+                        "INSERT INTO mcp_tokens (workspace_id, token_hash, tenant_id) VALUES (%s, %s, %s) "
                         "ON CONFLICT (workspace_id) DO UPDATE SET token_hash = EXCLUDED.token_hash, "
+                        "tenant_id = COALESCE(EXCLUDED.tenant_id, mcp_tokens.tenant_id), "
                         "created_at = NOW()",
-                        (workspace_id, token_hash),
+                        (workspace_id, token_hash, tenant_id),
                     )
                 conn.commit()
                 return True
@@ -338,6 +339,24 @@ class DatabaseService:
         except Exception as e:
             print(f"[DATABASE ERROR] Failed to store mcp token: {e}")
             return False
+
+    async def list_mcp_connectors(self, tenant_id: str) -> list:
+        """All MCP connectors for a tenant, joined with the workspace name."""
+        def _q():
+            with _conn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT m.workspace_id, m.created_at, w.name AS workspace_name "
+                        "FROM mcp_tokens m LEFT JOIN workspaces w ON w.workspace_id = m.workspace_id "
+                        "WHERE m.tenant_id=%s ORDER BY m.created_at DESC",
+                        (tenant_id,),
+                    )
+                    return [dict(r) for r in cur.fetchall()]
+        try:
+            return await _run(_q)
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to list mcp connectors: {e}")
+            return []
 
     async def get_dashboard_analytics(self, workspace_id: str, days: int = 30) -> Optional[Dict[str, Any]]:
         """Calls the get_dashboard_analytics Postgres function (same as the old Supabase RPC)."""

@@ -39,6 +39,10 @@ def make_request(method: str, path: str, user_id: str, **kwargs):
             return client.get(path, headers=headers, **kwargs)
         elif method == "POST":
             return client.post(path, headers=headers, **kwargs)
+        elif method == "PUT":
+            return client.put(path, headers=headers, **kwargs)
+        elif method == "PATCH":
+            return client.patch(path, headers=headers, **kwargs)
         elif method == "DELETE":
             return client.delete(path, headers=headers, **kwargs)
         else:
@@ -71,6 +75,10 @@ def bearer_request(method: str, path: str, token: str, **kwargs):
             return client.get(path, headers=headers, **kwargs)
         elif method == "POST":
             return client.post(path, headers=headers, **kwargs)
+        elif method == "PUT":
+            return client.put(path, headers=headers, **kwargs)
+        elif method == "PATCH":
+            return client.patch(path, headers=headers, **kwargs)
         elif method == "DELETE":
             return client.delete(path, headers=headers, **kwargs)
         else:
@@ -87,6 +95,10 @@ async def make_async_request(method: str, path: str, user_id: str, **kwargs):
             return await client.get(path, headers=headers, **kwargs)
         elif method == "POST":
             return await client.post(path, headers=headers, **kwargs)
+        elif method == "PUT":
+            return await client.put(path, headers=headers, **kwargs)
+        elif method == "PATCH":
+            return await client.patch(path, headers=headers, **kwargs)
         elif method == "DELETE":
             return await client.delete(path, headers=headers, **kwargs)
         else:

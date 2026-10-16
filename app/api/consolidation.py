@@ -626,7 +626,9 @@ async def _issue_mcp_url(workspace_id: str) -> str:
     """
     token = secrets.token_urlsafe(32)
     digest = hashlib.sha256(token.encode()).hexdigest()
-    if not await db.set_mcp_token_hash(workspace_id, digest):
+    workspace = await db.get_workspace(workspace_id)
+    tenant_id = workspace.get("tenant_id") if workspace else None
+    if not await db.set_mcp_token_hash(workspace_id, digest, tenant_id=tenant_id):
         # Minting failed and is already logged. Return the bare address rather
         # than a URL carrying a token the endpoint will reject.
         return _generate_mcp_url(workspace_id)

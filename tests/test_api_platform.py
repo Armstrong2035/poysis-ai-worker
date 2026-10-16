@@ -19,7 +19,7 @@ class APIPlatformTests(unittest.TestCase):
         self.app.include_router(platform.public_router)
         self.app.include_router(marketing.router)
         self.app.dependency_overrides[platform.get_key_store] = lambda: self.store
-        self.app.dependency_overrides[platform.require_owner] = lambda: ("workspace-a", "owner-a")
+        self.app.dependency_overrides[platform.require_owner] = lambda: ("workspace-a", "tenant-a", "owner-a")
         self.app.dependency_overrides[marketing.get_store] = lambda: self.marketing_store
         self.client = TestClient(self.app)
         self.addCleanup(self.client.close)
